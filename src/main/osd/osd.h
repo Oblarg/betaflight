@@ -189,6 +189,7 @@ typedef enum {
     OSD_GPS_LAP_TIME_CURRENT,
     OSD_GPS_LAP_TIME_PREVIOUS,
     OSD_GPS_LAP_TIME_BEST3,
+    OSD_HORIZON_LEVEL_STRENGTH,
     OSD_ITEM_COUNT // MUST BE LAST
 } osd_items_e;
 
@@ -355,6 +356,7 @@ typedef struct osdConfig_s {
 #ifdef USE_SPEC_PREARM_SCREEN
     uint8_t osd_show_spec_prearm;
 #endif // USE_SPEC_PREARM_SCREEN
+    uint8_t show_horizon_level_strength;
 } osdConfig_t;
 
 PG_DECLARE(osdConfig_t, osdConfig);

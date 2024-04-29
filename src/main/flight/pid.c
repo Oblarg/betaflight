@@ -88,6 +88,8 @@ FAST_DATA_ZERO_INIT float throttleBoost;
 pt1Filter_t throttleLpf;
 #endif
 
+FAST_DATA_ZERO_INIT float horizonStrength;
+
 PG_REGISTER_WITH_RESET_TEMPLATE(pidConfig_t, pidConfig, PG_PID_CONFIG, 3);
 
 #ifndef DEFAULT_PID_PROCESS_DENOM
@@ -828,6 +830,7 @@ void FAST_CODE pidController(const pidProfile_t *pidProfile, timeUs_t currentTim
         // Calc horizonLevelStrength if needed
         if (FLIGHT_MODE(HORIZON_MODE)) {
             horizonLevelStrength = calcHorizonLevelStrength();
+            horizonStrength = horizonLevelStrength;
         }
     } else {
         levelMode = LEVEL_MODE_OFF;

@@ -436,6 +436,8 @@ extern uint32_t targetPidLooptime;
 extern float throttleBoost;
 extern pt1Filter_t throttleLpf;
 
+extern float horizonStrength;
+
 void resetPidProfile(pidProfile_t *profile);
 
 void pidResetIterm(void);

@@ -709,6 +709,12 @@ static void osdElementAntiGravity(osdElementParms_t *element)
     }
 }
 
+static void osdElementHorizonLevelStrength(osdElementParms_t *element)
+{
+    element->buff[0] =  0x88 - (int) scaleRangef(horizonStrength, 0.0f,
+       1.0f, 0.0f, 8.0f);
+}
+
 #ifdef USE_ACC
 
 static void osdElementArtificialHorizon(osdElementParms_t *element)
@@ -1805,6 +1811,7 @@ static const uint8_t osdElementDisplayOrder[] = {
     OSD_DISARMED,
     OSD_NUMERICAL_HEADING,
     OSD_READY_MODE,
+    OSD_HORIZON_LEVEL_STRENGTH,
 #ifdef USE_VARIO
     OSD_NUMERICAL_VARIO,
 #endif
@@ -1878,6 +1885,7 @@ const osdElementDrawFn osdElementDrawFunction[OSD_ITEM_COUNT] = {
     [OSD_RSSI_VALUE]              = osdElementRssi,
     [OSD_MAIN_BATT_VOLTAGE]       = osdElementMainBatteryVoltage,
     [OSD_CROSSHAIRS]              = osdElementCrosshairs,  // only has background, but needs to be over other elements (like artificial horizon)
+    [OSD_HORIZON_LEVEL_STRENGTH]  = osdElementHorizonLevelStrength,
 #ifdef USE_ACC
     [OSD_ARTIFICIAL_HORIZON]      = osdElementArtificialHorizon,
     [OSD_UP_DOWN_REFERENCE]       = osdElementUpDownReference,
