@@ -1,0 +1,20 @@
+{
+  "yaw": {
+    "yawRate": -1.48725897,
+    "propVelSumSq": 0.00004631,
+    "propAccelSum": 0.00311271
+  },
+  "pitch": {
+    "pitchRate": -0.75951676,
+    "propVelSumSq": 0.00029667
+  },
+  "roll": {
+    "rollRate": -1.33847024,
+    "propVelSumSq": 0.00033981
+  },
+  "motors": {
+    "motorVel": 0.00666413,
+    "motorVelSq": 2.47091361e-06,
+    "motorAccel": 0.00014086
+  }
+}

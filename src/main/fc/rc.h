@@ -31,6 +31,7 @@
 
 void processRcCommand(void);
 float getSetpointRate(int axis);
+float getThrottleFrac(void);
 float getRcDeflection(int axis);
 float getRcDeflectionRaw(int axis);
 float getRcDeflectionAbs(int axis);

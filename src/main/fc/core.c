@@ -71,6 +71,9 @@
 #include "flight/imu.h"
 #include "flight/mixer.h"
 #include "flight/pid.h"
+#include "flight/lqr/lqr_controller.h"
+#include "flight/lqr/lqr_mixer.h"
+#include "flight/lqr/crashflip.h"
 #include "flight/position.h"
 #include "flight/rpm_filter.h"
 #include "flight/servos.h"
@@ -1175,59 +1178,59 @@ void processRxModes(timeUs_t currentTimeUs)
     pidSetAntiGravityState(IS_RC_MODE_ACTIVE(BOXANTIGRAVITY) || featureIsEnabled(FEATURE_ANTI_GRAVITY));
 }
 
-static FAST_CODE_NOINLINE void subTaskPidController(timeUs_t currentTimeUs)
-{
-    uint32_t startTime = 0;
-    if (debugMode == DEBUG_PIDLOOP) {startTime = micros();}
-    // PID - note this is function pointer set by setPIDController()
-    pidController(currentPidProfile, currentTimeUs);
-    DEBUG_SET(DEBUG_PIDLOOP, 1, micros() - startTime);
-
-#ifdef USE_RUNAWAY_TAKEOFF
-    // Check to see if runaway takeoff detection is active (anti-taz), the pidSum is over the threshold,
-    // and gyro rate for any axis is above the limit for at least the activate delay period.
-    // If so, disarm for safety
-    if (ARMING_FLAG(ARMED)
-        && !isFixedWing()
-        && pidConfig()->runaway_takeoff_prevention
-        && !runawayTakeoffCheckDisabled
-        && !crashFlipModeActive
-        && !runawayTakeoffTemporarilyDisabled
-        && !FLIGHT_MODE(GPS_RESCUE_MODE)   // disable Runaway Takeoff triggering if GPS Rescue is active
-        // check that motors are running
-        && (!featureIsEnabled(FEATURE_MOTOR_STOP) || isAirmodeEnabled() || (calculateThrottleStatus() != THROTTLE_LOW))) {
-
-        if (((fabsf(pidData[FD_PITCH].Sum) >= RUNAWAY_TAKEOFF_PIDSUM_THRESHOLD)
-            || (fabsf(pidData[FD_ROLL].Sum) >= RUNAWAY_TAKEOFF_PIDSUM_THRESHOLD)
-            || (fabsf(pidData[FD_YAW].Sum) >= RUNAWAY_TAKEOFF_PIDSUM_THRESHOLD))
-            && ((gyroAbsRateDps(FD_PITCH) > RUNAWAY_TAKEOFF_GYRO_LIMIT_RP)
-                || (gyroAbsRateDps(FD_ROLL) > RUNAWAY_TAKEOFF_GYRO_LIMIT_RP)
-                || (gyroAbsRateDps(FD_YAW) > RUNAWAY_TAKEOFF_GYRO_LIMIT_YAW))) {
-
-            if (runawayTakeoffTriggerUs == 0) {
-                runawayTakeoffTriggerUs = currentTimeUs + RUNAWAY_TAKEOFF_ACTIVATE_DELAY;
-            } else if (currentTimeUs > runawayTakeoffTriggerUs) {
-                setArmingDisabled(ARMING_DISABLED_RUNAWAY_TAKEOFF);
-                disarm(DISARM_REASON_RUNAWAY_TAKEOFF);
-            }
-        } else {
-            runawayTakeoffTriggerUs = 0;
-        }
-        DEBUG_SET(DEBUG_RUNAWAY_TAKEOFF, DEBUG_RUNAWAY_TAKEOFF_ENABLED_STATE, DEBUG_RUNAWAY_TAKEOFF_TRUE);
-        DEBUG_SET(DEBUG_RUNAWAY_TAKEOFF, DEBUG_RUNAWAY_TAKEOFF_ACTIVATING_DELAY, runawayTakeoffTriggerUs == 0 ? DEBUG_RUNAWAY_TAKEOFF_FALSE : DEBUG_RUNAWAY_TAKEOFF_TRUE);
-    } else {
-        runawayTakeoffTriggerUs = 0;
-        DEBUG_SET(DEBUG_RUNAWAY_TAKEOFF, DEBUG_RUNAWAY_TAKEOFF_ENABLED_STATE, DEBUG_RUNAWAY_TAKEOFF_FALSE);
-        DEBUG_SET(DEBUG_RUNAWAY_TAKEOFF, DEBUG_RUNAWAY_TAKEOFF_ACTIVATING_DELAY, DEBUG_RUNAWAY_TAKEOFF_FALSE);
-    }
-#endif
-
-#ifdef USE_PID_AUDIO
-    if (isModeActivationConditionPresent(BOXPIDAUDIO)) {
-        pidAudioUpdate();
-    }
-#endif
-}
+//static FAST_CODE_NOINLINE void subTaskPidController(timeUs_t currentTimeUs)
+//{
+//    uint32_t startTime = 0;
+//    if (debugMode == DEBUG_PIDLOOP) {startTime = micros();}
+//    // PID - note this is function pointer set by setPIDController()
+//    pidController(currentPidProfile, currentTimeUs);
+//    DEBUG_SET(DEBUG_PIDLOOP, 1, micros() - startTime);
+//
+//#ifdef USE_RUNAWAY_TAKEOFF
+//    // Check to see if runaway takeoff detection is active (anti-taz), the pidSum is over the threshold,
+//    // and gyro rate for any axis is above the limit for at least the activate delay period.
+//    // If so, disarm for safety
+//    if (ARMING_FLAG(ARMED)
+//        && !isFixedWing()
+//        && pidConfig()->runaway_takeoff_prevention
+//        && !runawayTakeoffCheckDisabled
+//        && !crashFlipModeActive
+//        && !runawayTakeoffTemporarilyDisabled
+//        && !FLIGHT_MODE(GPS_RESCUE_MODE)   // disable Runaway Takeoff triggering if GPS Rescue is active
+//        // check that motors are running
+//        && (!featureIsEnabled(FEATURE_MOTOR_STOP) || isAirmodeEnabled() || (calculateThrottleStatus() != THROTTLE_LOW))) {
+//
+//        if (((fabsf(pidData[FD_PITCH].Sum) >= RUNAWAY_TAKEOFF_PIDSUM_THRESHOLD)
+//            || (fabsf(pidData[FD_ROLL].Sum) >= RUNAWAY_TAKEOFF_PIDSUM_THRESHOLD)
+//            || (fabsf(pidData[FD_YAW].Sum) >= RUNAWAY_TAKEOFF_PIDSUM_THRESHOLD))
+//            && ((gyroAbsRateDps(FD_PITCH) > RUNAWAY_TAKEOFF_GYRO_LIMIT_RP)
+//                || (gyroAbsRateDps(FD_ROLL) > RUNAWAY_TAKEOFF_GYRO_LIMIT_RP)
+//                || (gyroAbsRateDps(FD_YAW) > RUNAWAY_TAKEOFF_GYRO_LIMIT_YAW))) {
+//
+//            if (runawayTakeoffTriggerUs == 0) {
+//                runawayTakeoffTriggerUs = currentTimeUs + RUNAWAY_TAKEOFF_ACTIVATE_DELAY;
+//            } else if (currentTimeUs > runawayTakeoffTriggerUs) {
+//                setArmingDisabled(ARMING_DISABLED_RUNAWAY_TAKEOFF);
+//                disarm(DISARM_REASON_RUNAWAY_TAKEOFF);
+//            }
+//        } else {
+//            runawayTakeoffTriggerUs = 0;
+//        }
+//        DEBUG_SET(DEBUG_RUNAWAY_TAKEOFF, DEBUG_RUNAWAY_TAKEOFF_ENABLED_STATE, DEBUG_RUNAWAY_TAKEOFF_TRUE);
+//        DEBUG_SET(DEBUG_RUNAWAY_TAKEOFF, DEBUG_RUNAWAY_TAKEOFF_ACTIVATING_DELAY, runawayTakeoffTriggerUs == 0 ? DEBUG_RUNAWAY_TAKEOFF_FALSE : DEBUG_RUNAWAY_TAKEOFF_TRUE);
+//    } else {
+//        runawayTakeoffTriggerUs = 0;
+//        DEBUG_SET(DEBUG_RUNAWAY_TAKEOFF, DEBUG_RUNAWAY_TAKEOFF_ENABLED_STATE, DEBUG_RUNAWAY_TAKEOFF_FALSE);
+//        DEBUG_SET(DEBUG_RUNAWAY_TAKEOFF, DEBUG_RUNAWAY_TAKEOFF_ACTIVATING_DELAY, DEBUG_RUNAWAY_TAKEOFF_FALSE);
+//    }
+//#endif
+//
+//#ifdef USE_PID_AUDIO
+//    if (isModeActivationConditionPresent(BOXPIDAUDIO)) {
+//        pidAudioUpdate();
+//    }
+//#endif
+//}
 
 static FAST_CODE_NOINLINE void subTaskPidSubprocesses(timeUs_t currentTimeUs)
 {
@@ -1267,42 +1270,42 @@ void subTaskTelemetryPollSensors(timeUs_t currentTimeUs)
 }
 #endif
 
-static FAST_CODE void subTaskMotorUpdate(timeUs_t currentTimeUs)
-{
-    uint32_t startTime = 0;
-    if (debugMode == DEBUG_CYCLETIME) {
-        startTime = micros();
-        static uint32_t previousMotorUpdateTime;
-        const uint32_t currentDeltaTime = startTime - previousMotorUpdateTime;
-        debug[2] = currentDeltaTime;
-        debug[3] = currentDeltaTime - targetPidLooptime;
-        previousMotorUpdateTime = startTime;
-    } else if (debugMode == DEBUG_PIDLOOP) {
-        startTime = micros();
-    }
-
-    mixTable(currentTimeUs);
-
-#ifdef USE_SERVOS
-    // motor outputs are used as sources for servo mixing, so motors must be calculated using mixTable() before servos.
-    if (isMixerUsingServos()) {
-        writeServos();
-    }
-#endif
-
-    writeMotors();
-
-#ifdef USE_DSHOT_TELEMETRY_STATS
-    if (debugMode == DEBUG_DSHOT_RPM_ERRORS && useDshotTelemetry) {
-        const uint8_t motorCount = MIN(getMotorCount(), 4);
-        for (uint8_t i = 0; i < motorCount; i++) {
-            debug[i] = getDshotTelemetryMotorInvalidPercent(i);
-        }
-    }
-#endif
-
-    DEBUG_SET(DEBUG_PIDLOOP, 2, micros() - startTime);
-}
+//static FAST_CODE void subTaskMotorUpdate(timeUs_t currentTimeUs)
+//{
+//    uint32_t startTime = 0;
+//    if (debugMode == DEBUG_CYCLETIME) {
+//        startTime = micros();
+//        static uint32_t previousMotorUpdateTime;
+//        const uint32_t currentDeltaTime = startTime - previousMotorUpdateTime;
+//        debug[2] = currentDeltaTime;
+//        debug[3] = currentDeltaTime - targetPidLooptime;
+//        previousMotorUpdateTime = startTime;
+//    } else if (debugMode == DEBUG_PIDLOOP) {
+//        startTime = micros();
+//    }
+//
+//    mixTable(currentTimeUs);
+//
+//#ifdef USE_SERVOS
+//    // motor outputs are used as sources for servo mixing, so motors must be calculated using mixTable() before servos.
+//    if (isMixerUsingServos()) {
+//        writeServos();
+//    }
+//#endif
+//
+//    writeMotors();
+//
+//#ifdef USE_DSHOT_TELEMETRY_STATS
+//    if (debugMode == DEBUG_DSHOT_RPM_ERRORS && useDshotTelemetry) {
+//        const uint8_t motorCount = MIN(getMotorCount(), 4);
+//        for (uint8_t i = 0; i < motorCount; i++) {
+//            debug[i] = getDshotTelemetryMotorInvalidPercent(i);
+//        }
+//    }
+//#endif
+//
+//    DEBUG_SET(DEBUG_PIDLOOP, 2, micros() - startTime);
+//}
 
 static FAST_CODE_NOINLINE void subTaskRcCommand(timeUs_t currentTimeUs)
 {
@@ -1378,8 +1381,16 @@ FAST_CODE void taskMainPidLoop(timeUs_t currentTimeUs)
     DEBUG_SET(DEBUG_PIDLOOP, 0, micros() - currentTimeUs);
 
     subTaskRcCommand(currentTimeUs);
-    subTaskPidController(currentTimeUs);
-    subTaskMotorUpdate(currentTimeUs);
+//    subTaskPidController(currentTimeUs);
+//    subTaskMotorUpdate(currentTimeUs);
+    mixTable(currentTimeUs);
+    MotorOutputsFractional motorOutputs;
+    if (isCrashFlipModeActive()) {
+        motorOutputs = mixCrashFlipOutputs();
+    } else {
+        motorOutputs = mixMotorOutputs(calculateAttitudeControl(), getThrottleFrac());
+    }
+    writeMotorOutputs(motorOutputs);
     subTaskPidSubprocesses(currentTimeUs);
 
     DEBUG_SET(DEBUG_CYCLETIME, 0, getTaskDeltaTimeUs(TASK_SELF));

@@ -96,6 +96,10 @@ laggedMovingAverageCombined_t  feedforwardDeltaAvg[XYZ_AXIS_COUNT];
 
 static pt1Filter_t feedforwardYawHoldLpf;
 
+float getThrottleFrac() {
+    return (rcCommand[THROTTLE] - 1000.f) / 500.f;
+}
+
 float getFeedforward(int axis)
 {
 #ifdef USE_RC_SMOOTHING_FILTER

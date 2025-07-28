@@ -43,6 +43,8 @@
 #include "sensors/battery.h"
 
 #include "motor.h"
+#include "flight/mixer_init.h"
+#include "fc/runtime_config.h"
 
 static FAST_DATA_ZERO_INIT motorDevice_t motorDevice;
 
@@ -126,6 +128,22 @@ void motorWriteAll(float *values)
 #else
     UNUSED(values);
 #endif
+}
+
+void writeMotorOutputs(MotorOutputsFractional outputs) {
+    float motorOutputRange = mixerRuntime.motorOutputHigh - mixerRuntime.motorOutputLow;
+
+    float motorOutputNative[4] = {0, 0, 0, 0};
+
+    for (int mot = 0; mot < 4; mot++) {
+        if (!ARMING_FLAG(ARMED)) {
+            motorOutputNative[mot] = mixerRuntime.disarmMotorOutput;
+        } else {
+            motorOutputNative[mot] = mixerRuntime.motorOutputLow + outputs.frac[mot] * motorOutputRange;
+        }
+    }
+
+    motorWriteAll(motorOutputNative);
 }
 
 void motorRequestTelemetry(unsigned index)

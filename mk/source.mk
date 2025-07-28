@@ -176,6 +176,10 @@ COMMON_SRC = \
             flight/rpm_filter.c \
             flight/servos.c \
             flight/servos_tricopter.c \
+            flight/lqr/lqr_constants.c \
+            flight/lqr/lqr_controller.c \
+            flight/lqr/lqr_mixer.c \
+            flight/lqr/crashflip.c \
             io/serial_4way.c \
             io/serial_4way_avrootloader.c \
             io/serial_4way_stk500v2.c \
@@ -449,6 +453,7 @@ SPEED_OPTIMISED_SRC += \
             flight/imu.c \
             flight/mixer.c \
             flight/pid.c \
+            flight/lqr/lqr_controller.c \
             flight/rpm_filter.c \
             rx/ibus.c \
             rx/rc_stats.c \
@@ -475,6 +480,7 @@ SIZE_OPTIMISED_SRC += \
             sensors/acceleration_init.c \
             flight/pid_init.c \
             flight/mixer_init.c \
+            flight/lqr/lqr_constants.c \
             cli/cli.c \
             cli/settings.c \
             drivers/light_ws2811strip.c \
