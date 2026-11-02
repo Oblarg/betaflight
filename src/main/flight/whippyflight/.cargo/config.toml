@@ -1,0 +1,10 @@
+[build]
+# Default target for `cargo build` — Cortex-M4F/M7F with hardware float (STM32F4/F7/H7)
+target = "thumbv7em-none-eabihf"
+
+[target.thumbv7em-none-eabihf]
+rustflags = [
+    # Use the cortex-m-rt linker script sections (data, bss, etc.)
+    # BF provides its own linker script, so we just produce a static lib
+    "-C", "link-arg=-nostartfiles",
+]

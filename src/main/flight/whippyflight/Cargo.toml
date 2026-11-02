@@ -1,0 +1,31 @@
+[package]
+name = "whippyflight-control"
+version = "0.1.0"
+edition = "2024"
+authors = ["Oblarg"]
+license = "GPL-3.0-or-later"
+description = "LQR flight control stack for Betaflight, powered by whippyunits + whippyalgebra"
+
+[lib]
+name = "whippyflight_control"
+crate-type = ["staticlib"]
+
+[dependencies]
+# Unit-safe quantities — no_std, no alloc
+whippyunits = { git = "https://github.com/WhippyUnits/whippyunits-rs.git", default-features = false }
+# Unit-safe linear algebra over nalgebra — no_std, no alloc
+whippyalgebra = { git = "https://github.com/WhippyUnits/whippyunits-rs.git", default-features = false, features = ["nalgebra"] }
+
+[features]
+default = []
+# Enable std for host-side testing (cargo test on x86)
+std = ["whippyunits/std", "whippyalgebra/std"]
+
+[profile.release]
+opt-level = "s"    # optimize for size on embedded
+lto = true
+codegen-units = 1
+panic = "abort"
+
+[profile.dev]
+panic = "abort"
