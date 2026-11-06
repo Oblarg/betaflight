@@ -372,6 +372,8 @@ dependencies = [
 name = "whippyflight-control"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
+ "libm",
  "serde_json",
  "whippyalgebra",
  "whippyunits",

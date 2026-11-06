@@ -12,9 +12,11 @@
 
 mod common;
 
+use common::units::{Rate, Time};
 use whippyflight_control::controller::ControllerState;
 use whippyflight_control::gains::{load_gains, GainStorage, REF_FLOATS};
 use whippyflight_control::types::*;
+use whippyunits::value;
 
 /// Load the test_gains.wfg blob.
 static TEST_WFG: &[u8] = include_bytes!("../tools/test_gains.wfg");
@@ -27,10 +29,18 @@ fn load_test_gains() -> GainStorage {
     storage
 }
 
-fn make_hover_sensors(battery_v: f32) -> SensorData {
+const HOVER_RPS: RotPerSec = RotPerSec::new(275.0);
+const FULL: Volt = Volt::new(16.8);
+const ZERO_V: Volt = Volt::new(0.0);
+
+fn rates(r: [f32; 3]) -> [RotPerSec; 3] {
+    r.map(RotPerSec::new)
+}
+
+fn make_hover_sensors(battery_v: Volt) -> SensorData {
     SensorData {
-        gyro_rps: [0.0, 0.0, 0.0],        // [roll, pitch, yaw] — no rotation
-        motor_rps: [275.0, 275.0, 275.0, 275.0], // mid-range hover
+        gyro_rps: rates([0.0, 0.0, 0.0]), // [roll, pitch, yaw] — no rotation
+        motor_rps: [HOVER_RPS; 4],        // mid-range hover
         battery_voltage: battery_v,
         accel_g: [0.0; 3],
     }
@@ -50,9 +60,19 @@ fn between(x: f32, a: f32, b: f32) -> bool {
 
 fn make_hover_setpoint() -> SetpointData {
     SetpointData {
-        rate_rps: [0.0, 0.0, 0.0],
+        rate_rps: rates([0.0, 0.0, 0.0]),
         throttle: 0.5,
     }
+}
+
+/// |e| of an integral-error vector.
+fn magnitude(e: [Rotation; 3]) -> Rotation {
+    (e[0] * e[0] + e[1] * e[1] + e[2] * e[2]).sqrt()
+}
+
+/// For messages.
+fn rot(x: Rotation) -> f32 {
+    value!(x, rot, f32)
 }
 
 // ── Gain loading ────────────────────────────────────────────────────────
@@ -61,13 +81,14 @@ fn make_hover_setpoint() -> SetpointData {
 fn real_gains_load_successfully() {
     let gains = load_test_gains();
     assert_eq!(gains.header.resolution, 3);
-    assert!((gains.header.min_rps - 50.0).abs() < 0.01);
+    assert!((gains.header.min_rps - RotPerSec::new(50.0)).abs() < RotPerSec::new(0.01));
     // gen_wfg derives the top of the grid from the motor fit on a full
     // battery, well above hover.
-    assert!(gains.header.max_rps as f64 > 1.5 * common::plant::model().hover_rps);
-    assert!((gains.header.dt - 0.00025).abs() < 1e-6);
-    assert!((gains.header.integral_tau - 10.0).abs() < 0.01);
-    assert!((gains.header.derivative_tau - 0.02).abs() < 0.01);
+    let max_rps: Rate = gains.header.max_rps.lossy_into();
+    assert!(max_rps > 1.5 * common::plant::model().hover_rps);
+    assert!((gains.header.dt - Seconds::new(0.00025)).abs() < Seconds::new(1e-6));
+    assert!((gains.header.integral_tau - Seconds::new(10.0)).abs() < Seconds::new(0.01));
+    assert!((gains.header.derivative_tau - Seconds::new(0.02)).abs() < Seconds::new(0.01));
 }
 
 #[test]
@@ -77,10 +98,10 @@ fn real_gains_are_nonzero() {
     let table_len = n * n * n * n * 4 * 3;
 
     // Each table should have significant nonzero entries
-    let ki_nz = (0..table_len).filter(|&i| gains.ki.get(i).abs() > 1e-8).count();
-    let kd_nz = (0..table_len).filter(|&i| gains.kd.get(i).abs() > 1e-8).count();
-    let kp_nz = (0..table_len).filter(|&i| gains.kp.get(i).abs() > 1e-8).count();
-    let binv_nz = (0..table_len).filter(|&i| gains.binv.get(i).abs() > 1e-8).count();
+    let ki_nz = (0..table_len).filter(|&i| gains.ki.get(i).abs() > VoltPerRot::new(1e-8)).count();
+    let kd_nz = (0..table_len).filter(|&i| gains.kd.get(i).abs() > VoltPerRpsPerSec::new(1e-8)).count();
+    let kp_nz = (0..table_len).filter(|&i| gains.kp.get(i).abs() > VoltPerRps::new(1e-8)).count();
+    let binv_nz = (0..table_len).filter(|&i| gains.binv.get(i).abs() > VoltPerRps::new(1e-8)).count();
 
     assert!(ki_nz > table_len / 2, "Ki mostly zero: {ki_nz}/{table_len}");
     assert!(kd_nz > table_len / 2, "Kd mostly zero: {kd_nz}/{table_len}");
@@ -95,7 +116,7 @@ fn hover_produces_roughly_equal_motors() {
     let gains = load_test_gains();
     let mut ctrl = ControllerState::new();
 
-    let sensors = make_hover_sensors(16.8);
+    let sensors = make_hover_sensors(FULL);
     let setpoint = make_hover_setpoint();
 
     // Run a few iterations to let state settle
@@ -132,7 +153,7 @@ fn pitch_disturbance_produces_differential_response() {
     let mut ctrl = ControllerState::new();
 
     // Settle at hover first
-    let hover_sensors = make_hover_sensors(16.8);
+    let hover_sensors = make_hover_sensors(FULL);
     let setpoint = make_hover_setpoint();
     for _ in 0..200 {
         ctrl.update(&hover_sensors, &setpoint, &gains);
@@ -141,7 +162,7 @@ fn pitch_disturbance_produces_differential_response() {
     // Inject positive pitch rate disturbance (nose up)
     // gyro reads positive pitch rate, but setpoint is zero → negative error
     let disturbed = SensorData {
-        gyro_rps: [0.0, 0.5, 0.0],  // [roll=0, pitch=+0.5 rot/s, yaw=0]
+        gyro_rps: rates([0.0, 0.5, 0.0]),  // [roll=0, pitch=+0.5 rot/s, yaw=0]
         ..hover_sensors
     };
 
@@ -175,7 +196,7 @@ fn roll_disturbance_produces_differential_response() {
     let gains = load_test_gains();
     let mut ctrl = ControllerState::new();
 
-    let hover_sensors = make_hover_sensors(16.8);
+    let hover_sensors = make_hover_sensors(FULL);
     let setpoint = make_hover_setpoint();
     for _ in 0..200 {
         ctrl.update(&hover_sensors, &setpoint, &gains);
@@ -183,7 +204,7 @@ fn roll_disturbance_produces_differential_response() {
 
     // Inject positive roll disturbance
     let disturbed = SensorData {
-        gyro_rps: [0.5, 0.0, 0.0],  // [roll=+0.5 rot/s, pitch=0, yaw=0]
+        gyro_rps: rates([0.5, 0.0, 0.0]),  // [roll=+0.5 rot/s, pitch=0, yaw=0]
         ..hover_sensors
     };
 
@@ -214,7 +235,7 @@ fn yaw_disturbance_produces_diagonal_response() {
     let gains = load_test_gains();
     let mut ctrl = ControllerState::new();
 
-    let hover_sensors = make_hover_sensors(16.8);
+    let hover_sensors = make_hover_sensors(FULL);
     let setpoint = make_hover_setpoint();
     for _ in 0..200 {
         ctrl.update(&hover_sensors, &setpoint, &gains);
@@ -222,7 +243,7 @@ fn yaw_disturbance_produces_diagonal_response() {
 
     // Inject yaw disturbance
     let disturbed = SensorData {
-        gyro_rps: [0.0, 0.0, 0.5],  // [roll=0, pitch=0, yaw=+0.5 rot/s]
+        gyro_rps: rates([0.0, 0.0, 0.5]),  // [roll=0, pitch=0, yaw=+0.5 rot/s]
         ..hover_sensors
     };
 
@@ -255,16 +276,15 @@ fn integral_accumulates_under_sustained_error() {
     let mut ctrl = ControllerState::new();
 
     // Small sustained roll command — gyro reads zero, so error persists.
-    let sensors = make_hover_sensors(16.8);
+    let sensors = make_hover_sensors(FULL);
     let setpoint = SetpointData {
-        rate_rps: [0.02, 0.0, 0.0],
+        rate_rps: rates([0.02, 0.0, 0.0]),
         throttle: 0.5,
     };
 
     // Run one iteration to capture initial telemetry
     ctrl.update(&sensors, &setpoint, &gains);
-    let telem_early = ctrl.telemetry().error_integral;
-    let early_mag: f32 = telem_early.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let early_mag = magnitude(ctrl.telemetry().error_integral);
 
     // Run many more iterations
     for _ in 0..2000 {
@@ -274,14 +294,14 @@ fn integral_accumulates_under_sustained_error() {
     let telem = ctrl.telemetry();
     assert!(telem.status == 1, "Controller not active");
 
-    let late_mag: f32 = telem.error_integral.iter().map(|x| x * x).sum::<f32>().sqrt();
-    println!("Integral mag: after 1 iter={early_mag:.6}, after 2001 iters={late_mag:.6}");
-    println!("Integral state: [{:.5}, {:.5}, {:.5}]",
-             telem.error_integral[0], telem.error_integral[1], telem.error_integral[2]);
+    let late_mag = magnitude(telem.error_integral);
+    println!("Integral mag: after 1 iter={:.6}, after 2001 iters={:.6} rot", rot(early_mag), rot(late_mag));
+    println!("Integral state: [{:.5}, {:.5}, {:.5}] rot",
+             rot(telem.error_integral[0]), rot(telem.error_integral[1]), rot(telem.error_integral[2]));
 
     // The integral state must grow over time with sustained error.
     assert!(late_mag > early_mag * 5.0,
-            "Integral didn't grow significantly: early={early_mag}, late={late_mag}");
+            "Integral didn't grow significantly: early={early_mag:?}, late={late_mag:?}");
 
     // The integral should be primarily in the roll axis (index 0)
     assert!(telem.error_integral[0].abs() > telem.error_integral[1].abs() * 10.0,
@@ -307,9 +327,9 @@ fn lower_battery_increases_duty_for_same_correction() {
     // The collective (throttle·n) is battery-independent in duty, so compare
     // the correction alone: disturbed minus undisturbed after equal history.
     let setpoint = make_hover_setpoint();
-    let correction_spread = |battery_v: f32| {
+    let correction_spread = |battery_v: Volt| {
         let sensors = make_hover_sensors(battery_v);
-        let disturbed = SensorData { gyro_rps: [0.0, 0.01, 0.0], ..sensors };
+        let disturbed = SensorData { gyro_rps: rates([0.0, 0.01, 0.0]), ..sensors };
         let mut ctrl = ControllerState::new();
         for _ in 0..50 {
             ctrl.update(&sensors, &setpoint, &gains);
@@ -322,8 +342,8 @@ fn lower_battery_increases_duty_for_same_correction() {
         let base = baseline.update(&sensors, &setpoint, &gains);
         (0..4).map(|m| (out.motor_duty[m] - base.motor_duty[m]).abs()).sum::<f32>()
     };
-    let spread_high = correction_spread(16.8);
-    let spread_low = correction_spread(14.0);
+    let spread_high = correction_spread(FULL);
+    let spread_low = correction_spread(Volt::new(14.0));
 
     println!("Spread @16.8V={spread_high:.6}, @14.0V={spread_low:.6}");
     assert!(spread_low > spread_high * 1.01,
@@ -339,21 +359,20 @@ fn reset_clears_integral_and_derivative_state() {
 
     // Build up integral state (small enough an error not to saturate, which
     // would hold the integrator)
-    let sensors = make_hover_sensors(16.8);
+    let sensors = make_hover_sensors(FULL);
+    let error = RotPerSec::new(0.02);
     let setpoint = SetpointData {
-        rate_rps: [0.02, 0.0, 0.0],
+        rate_rps: [error, RotPerSec::new(0.0), RotPerSec::new(0.0)],
         throttle: 0.5,
     };
     for _ in 0..500 {
         ctrl.update(&sensors, &setpoint, &gains);
     }
 
-    let pre_telem = ctrl.telemetry();
-    let pre_integral_mag: f32 = pre_telem.error_integral.iter()
-        .map(|x| x * x).sum::<f32>().sqrt();
+    let pre_integral_mag = magnitude(ctrl.telemetry().error_integral);
     // 500 ticks of a 0.02 rot/s error, each adding (dt/τ_int)·dt·e; allow half.
     let dt = gains.header.dt;
-    let expected = 500.0 * (dt / gains.header.integral_tau) * dt * 0.02;
+    let expected = 500.0 * f32::from(dt / gains.header.integral_tau) * dt * error;
     assert!(pre_integral_mag > 0.5 * expected, "No integral buildup before reset");
 
     // Reset
@@ -362,38 +381,36 @@ fn reset_clears_integral_and_derivative_state() {
     // Run one hover iteration
     let hover_setpoint = make_hover_setpoint();
     ctrl.update(&sensors, &hover_setpoint, &gains);
-    let post_telem = ctrl.telemetry();
-    let post_integral_mag: f32 = post_telem.error_integral.iter()
-        .map(|x| x * x).sum::<f32>().sqrt();
+    let post_integral_mag = magnitude(ctrl.telemetry().error_integral);
 
-    println!("Integral: pre-reset={pre_integral_mag:.5}, post-reset={post_integral_mag:.5}");
+    println!("Integral: pre-reset={:.5}, post-reset={:.5} rot", rot(pre_integral_mag), rot(post_integral_mag));
     assert!(post_integral_mag < pre_integral_mag * 0.01,
-            "Reset didn't clear integral: pre={pre_integral_mag}, post={post_integral_mag}");
+            "Reset didn't clear integral: pre={pre_integral_mag:?}, post={post_integral_mag:?}");
 }
 
 // ── Affine linearizer ───────────────────────────────────────────────────
 
 /// motorVelSq of the coefficient JSON (V per (eRPM/600)²).
-fn k_omega_sq() -> f32 {
-    common::plant::model().motor_vel_sq as f32
+fn k_omega_sq() -> VoltPerRpsSq {
+    common::plant::model().motor_vel_sq.lossy_into()
 }
 
 #[test]
 fn affine_block_is_loaded() {
     let gains = load_test_gains();
-    assert!(gains.affine.iter().any(|&g| g != 0.0), "v2 blob has an all-zero affine block");
+    assert!(gains.affine.iter().any(|&g| g != VoltPerRpsSq::new(0.0)), "v2 blob has an all-zero affine block");
 }
 
 #[test]
 fn affine_cancels_quadratic_motor_term_at_hover() {
     let gains = load_test_gains();
     let mut ctrl = ControllerState::new();
-    ctrl.update(&make_hover_sensors(16.8), &make_hover_setpoint(), &gains);
+    ctrl.update(&make_hover_sensors(FULL), &make_hover_setpoint(), &gains);
 
-    let expected = -k_omega_sq() * 275.0 * 275.0;
+    let expected = -k_omega_sq() * HOVER_RPS * HOVER_RPS;
     for (m, &v) in ctrl.telemetry().affine_v.iter().enumerate() {
         assert!((v - expected).abs() < 1e-3 * expected.abs(),
-                "motor {m}: affine {v} V, expected {expected} V");
+                "motor {m}: affine {v:?}, expected {expected:?}");
     }
 }
 
@@ -401,14 +418,14 @@ fn affine_cancels_quadratic_motor_term_at_hover() {
 fn affine_tracks_each_motor_speed() {
     let gains = load_test_gains();
     let mut ctrl = ControllerState::new();
-    let speeds = [300.0, 250.0, 250.0, 300.0];
-    let sensors = SensorData { motor_rps: speeds, ..make_hover_sensors(16.8) };
+    let speeds = [300.0, 250.0, 250.0, 300.0].map(RotPerSec::new);
+    let sensors = SensorData { motor_rps: speeds, ..make_hover_sensors(FULL) };
     ctrl.update(&sensors, &make_hover_setpoint(), &gains);
 
     for (m, &v) in ctrl.telemetry().affine_v.iter().enumerate() {
         let expected = -k_omega_sq() * speeds[m] * speeds[m];
         assert!((v - expected).abs() < 1e-2 * expected.abs(),
-                "motor {m}: affine {v} V, expected ≈{expected} V");
+                "motor {m}: affine {v:?}, expected ≈{expected:?}");
     }
 }
 
@@ -416,7 +433,7 @@ fn affine_tracks_each_motor_speed() {
 fn affine_uses_grid_clamped_speed() {
     let gains = load_test_gains();
     let mut ctrl = ControllerState::new();
-    let sensors = SensorData { motor_rps: [0.0; 4], ..make_hover_sensors(16.8) };
+    let sensors = SensorData { motor_rps: [RotPerSec::new(0.0); 4], ..make_hover_sensors(FULL) };
     ctrl.update(&sensors, &make_hover_setpoint(), &gains);
 
     let min = gains.header.min_rps;
@@ -431,59 +448,60 @@ fn affine_uses_grid_clamped_speed() {
 // main.R fits raw blackbox columns, so these encode the logged quad:
 // +roll accel from motors 2,3; +pitch from motors 0,2; +yaw from 1,2.
 
-fn feedback_for_rate_error(axis: usize) -> [f32; 4] {
+fn feedback_for_rate_error(axis: usize) -> [Volt; 4] {
     let gains = load_test_gains();
     let mut ctrl = ControllerState::new();
     let mut setpoint = make_hover_setpoint();
-    setpoint.rate_rps[axis] = 0.1;
-    ctrl.update(&make_hover_sensors(16.8), &setpoint, &gains);
+    setpoint.rate_rps[axis] = RotPerSec::new(0.1);
+    ctrl.update(&make_hover_sensors(FULL), &setpoint, &gains);
     ctrl.telemetry().feedback_v
 }
 
 #[test]
 fn positive_roll_error_drives_motors_2_3() {
     let v = feedback_for_rate_error(0);
-    assert!(v[2] > 0.0 && v[3] > 0.0 && v[0] < 0.0 && v[1] < 0.0, "{v:?}");
+    assert!(v[2] > ZERO_V && v[3] > ZERO_V && v[0] < ZERO_V && v[1] < ZERO_V, "{v:?}");
 }
 
 #[test]
 fn positive_pitch_error_drives_motors_0_2() {
     let v = feedback_for_rate_error(1);
-    assert!(v[0] > 0.0 && v[2] > 0.0 && v[1] < 0.0 && v[3] < 0.0, "{v:?}");
+    assert!(v[0] > ZERO_V && v[2] > ZERO_V && v[1] < ZERO_V && v[3] < ZERO_V, "{v:?}");
 }
 
 #[test]
 fn positive_yaw_error_drives_motors_1_2() {
     let v = feedback_for_rate_error(2);
-    assert!(v[1] > 0.0 && v[2] > 0.0 && v[0] < 0.0 && v[3] < 0.0, "{v:?}");
+    assert!(v[1] > ZERO_V && v[2] > ZERO_V && v[0] < ZERO_V && v[3] < ZERO_V, "{v:?}");
 }
 
 // ── Reference-model feedforward ─────────────────────────────────────────
 
-/// Stick flick amplitude (rot/s): small enough that hover collective plus
+/// Stick flick amplitude: small enough that hover collective plus
 /// feedforward stays off the rails (as tools/ff_reference.py assumes).
-const FLICK_RPS: f32 = 0.4;
+const FLICK: RotPerSec = RotPerSec::new(0.4);
 
-/// Run the controller through a FLICK_RPS stick flick on `axis` (linear over
+/// Run the controller through a FLICK stick flick on `axis` (linear over
 /// 30 ms, then PT3-smoothed at 190 Hz like BF's rc_smoothing at 500 Hz RX),
 /// with the gyro following the setpoint so feedback stays idle and the
 /// outputs never saturate (saturation bleeds the reference model).
 /// Returns per-tick feedforward voltages.
-fn stick_flick_feedforward(axis: usize, ticks: usize) -> Vec<[f32; 4]> {
+fn stick_flick_feedforward(axis: usize, ticks: usize) -> Vec<[Volt; 4]> {
     let gains = load_test_gains();
     let mut ctrl = ControllerState::new();
     let dt = gains.header.dt;
-    let a = 1.0 - (-2.0 * core::f32::consts::PI * 190.0 * 1.96 * dt).exp();
-    let mut s = [0.0f32; 3];
+    let pt3_cutoff = Hertz::new(190.0 * 1.96);
+    let a = 1.0 - (-2.0 * core::f32::consts::PI * f32::from(pt3_cutoff * dt)).exp();
+    let mut s = [RotPerSec::new(0.0); 3];
     let mut out = Vec::with_capacity(ticks);
     for k in 0..ticks {
-        let raw = FLICK_RPS * (k as f32 * dt / 0.03).min(1.0);
-        s[0] += a * (raw - s[0]);
-        s[1] += a * (s[0] - s[1]);
-        s[2] += a * (s[1] - s[2]);
+        let raw = FLICK * f32::from(k as f32 * dt / Seconds::new(0.03)).min(1.0);
+        s[0] = s[0] + a * (raw - s[0]);
+        s[1] = s[1] + a * (s[0] - s[1]);
+        s[2] = s[2] + a * (s[1] - s[2]);
         let mut sp = make_hover_setpoint();
         sp.rate_rps[axis] = s[2];
-        let mut sensors = make_hover_sensors(16.8);
+        let mut sensors = make_hover_sensors(FULL);
         sensors.gyro_rps = sp.rate_rps;
         ctrl.update(&sensors, &sp, &gains);
         out.push(ctrl.telemetry().feedforward_v);
@@ -491,8 +509,8 @@ fn stick_flick_feedforward(axis: usize, ticks: usize) -> Vec<[f32; 4]> {
     out
 }
 
-fn peak(ff: &[[f32; 4]]) -> f32 {
-    ff.iter().flatten().fold(0.0f32, |m, v| m.max(v.abs()))
+fn peak(ff: &[[Volt; 4]]) -> Volt {
+    ff.iter().flatten().fold(ZERO_V, |m, v| m.max(v.abs()))
 }
 
 #[test]
@@ -508,30 +526,32 @@ fn blob_has_reference_model() {
 fn pitch_flick_feedforward_matches_reference() {
     let ff = stick_flick_feedforward(1, 1200);
     let p = peak(&ff);
-    assert!((p - 4.331).abs() < 0.22, "peak pitch feedforward {p} V, reference 4.331 V");
+    assert!((p - Volt::new(4.331)).abs() < Volt::new(0.22), "peak pitch feedforward {p:?}, reference 4.331 V");
     let last = ff.last().unwrap();
-    assert!(last.iter().all(|v| v.abs() < 0.03), "settled feedforward {last:?}");
+    assert!(last.iter().all(|v| v.abs() < Volt::new(0.03)), "settled feedforward {last:?}");
     // Direction: +pitch request drives motors 0,2 (as feedback does).
     let early = ff[40];
-    assert!(early[0] > 0.0 && early[2] > 0.0 && early[1] < 0.0 && early[3] < 0.0, "{early:?}");
+    assert!(early[0] > ZERO_V && early[2] > ZERO_V && early[1] < ZERO_V && early[3] < ZERO_V, "{early:?}");
 }
 
 #[test]
 fn yaw_flick_feedforward_matches_reference() {
     let ff = stick_flick_feedforward(2, 1200);
     let p = peak(&ff);
-    assert!((p - 0.586).abs() < 0.03, "peak yaw feedforward {p} V, reference 0.586 V");
+    assert!((p - Volt::new(0.586)).abs() < Volt::new(0.03), "peak yaw feedforward {p:?}, reference 0.586 V");
     // Holding a yaw rate needs a steady drag-compensating voltage.
     let last = ff.last().unwrap();
-    assert!(last.iter().all(|v| (v.abs() - 0.069).abs() < 0.004), "settled yaw feedforward {last:?}");
-    assert!(last[1] > 0.0 && last[2] > 0.0, "{last:?}");
+    assert!(last.iter().all(|v| (v.abs() - Volt::new(0.069)).abs() < Volt::new(0.004)),
+            "settled yaw feedforward {last:?}");
+    assert!(last[1] > ZERO_V && last[2] > ZERO_V, "{last:?}");
 }
 
 #[test]
 fn feedforward_has_no_nyquist_chatter() {
     let ff = stick_flick_feedforward(1, 1200);
-    let du: Vec<f32> = ff.windows(2).map(|w| w[1][0] - w[0][0]).collect();
-    let flips = du.windows(2).filter(|w| w[0] * w[1] < 0.0 && w[0].abs() > 1e-4).count();
+    let du: Vec<Volt> = ff.windows(2).map(|w| w[1][0] - w[0][0]).collect();
+    let opposite = |a: Volt, b: Volt| (a < ZERO_V && b > ZERO_V) || (a > ZERO_V && b < ZERO_V);
+    let flips = du.windows(2).filter(|w| opposite(w[0], w[1]) && w[0].abs() > Volt::new(1e-4)).count();
     assert!(flips < du.len() / 20, "{flips} sign flips in {} ticks", du.len());
 }
 
@@ -542,33 +562,33 @@ fn feedforward_has_no_nyquist_chatter() {
 /// motor speed, which acts as extra motor drag.
 #[test]
 fn reference_model_predicts_the_plant() {
-    use common::plant::{model, Plant};
+    use common::plant::{duty_volts, model, Plant};
     use whippyflight_control::setpoint::SetpointEstimator;
     let gains = load_test_gains();
-    let dt = gains.header.dt as f64;
-    let amp = 0.1f32;
+    let dt: Time = gains.header.dt.lossy_into();
+    let amp = RotPerSec::new(0.1);
     for axis in [0usize, 1] {
         let mut ctrl = ControllerState::new();
         let mut est = SetpointEstimator::new();
         est.configure_for(&gains);
         let mut plant = Plant::hovering(1.0);
-        let mut worst = 0.0f32;
+        let mut worst = RotPerSec::new(0.0);
         // Settle from the uniform start (not torque-free on unequal arms).
-        let start = 1.0;
-        for k in 0..((start + 0.5) / dt) as usize {
+        let start = Time::new(1.0);
+        for k in 0..f64::from((start + Time::new(0.5)) / dt) as usize {
             let t = k as f64 * dt;
-            let now_us = (t * 1e6) as u32;
+            let now_us = common::micros64(t);
             if k % 8 == 0 {
-                let mut stick = [0.0; 3];
-                stick[axis] = amp * ((t - start) / 0.03).clamp(0.0, 1.0) as f32;
-                est.packet(stick, now_us, 0.002);
+                let mut stick = [RotPerSec::new(0.0); 3];
+                stick[axis] = amp * f64::from((t - start) / Time::new(0.03)).clamp(0.0, 1.0) as f32;
+                est.packet(stick, now_us, Seconds::new(0.002));
             }
-            let (rate, target) = est.tick(now_us, dt as f32);
+            let (rate, target) = est.tick(now_us, dt.lossy_into());
             let sp = SetpointData { rate_rps: rate, throttle: model().throttle_at(1.0) };
-            let s = SensorData { gyro_rps: plant.gyro_bf(), motor_rps: plant.omega.map(|w| w as f32),
+            let s = SensorData { gyro_rps: plant.gyro_bf(), motor_rps: plant.motor_rps(),
                                  battery_voltage: model().battery_v(), accel_g: [0.0; 3] };
-            let volts = ctrl.update_with_target(&s, &sp, target, &gains).motor_duty.map(|d| (d * model().battery_v()) as f64);
-            assert_eq!(ctrl.telemetry().command_scale, 1.0, "saturated at {t:.4} s");
+            let volts = duty_volts(ctrl.update_with_target(&s, &sp, target, &gains).motor_duty);
+            assert_eq!(ctrl.telemetry().command_scale, 1.0, "saturated at {t:?}");
             for _ in 0..4 {
                 plant.rk4(&volts, dt / 4.0);
             }
@@ -577,7 +597,8 @@ fn reference_model_predicts_the_plant() {
             }
         }
         // Without the linearizer's feedback in the model: ≈5% here.
-        assert!(worst <= 0.01 * amp, "axis {axis}: reference model off by {:.1}% of the flick", 100.0 * worst / amp);
+        assert!(worst <= 0.01 * amp, "axis {axis}: reference model off by {:.1}% of the flick",
+                100.0 * f32::from(worst / amp));
     }
 }
 
@@ -587,39 +608,40 @@ fn reference_model_seeds_without_kick() {
     let gains = load_test_gains();
     let mut ctrl = ControllerState::new();
     let mut sp = make_hover_setpoint();
-    sp.rate_rps = [0.5, -0.3, 0.2];
-    ctrl.update(&make_hover_sensors(16.8), &sp, &gains);
+    sp.rate_rps = rates([0.5, -0.3, 0.2]);
+    ctrl.update(&make_hover_sensors(FULL), &sp, &gains);
     let ff = ctrl.telemetry().feedforward_v;
     // Only the steady hold term for the seeded rate (no step response).
-    assert!(ff.iter().all(|v| v.abs() < 1.0), "{ff:?}");
+    assert!(ff.iter().all(|v| v.abs() < Volt::new(1.0)), "{ff:?}");
 }
 
 #[test]
 fn min_rps_floor_overrides_reported_speed() {
     // A dead/zero telemetry motor must be linearized at the floor, not 0.
     let gains = load_test_gains();
-    let floor = 120.0;
-    let run = |rps: [f32; 4], set_floor: bool| {
+    let floor = RotPerSec::new(120.0);
+    let stopped = [RotPerSec::new(0.0); 4];
+    let run = |rps: [RotPerSec; 4], set_floor: bool| {
         let mut ctrl = ControllerState::new();
         if set_floor { ctrl.set_min_rps(floor); }
-        let sensors = SensorData { motor_rps: rps, ..make_hover_sensors(16.8) };
+        let sensors = SensorData { motor_rps: rps, ..make_hover_sensors(FULL) };
         let mut sp = make_hover_setpoint();
-        sp.rate_rps[1] = 0.1;
+        sp.rate_rps[1] = RotPerSec::new(0.1);
         ctrl.update(&sensors, &sp, &gains);
         *ctrl.telemetry()
     };
-    let floored = run([0.0; 4], true);
+    let floored = run(stopped, true);
     let at_floor = run([floor; 4], false);
     assert_eq!(floored.feedback_v, at_floor.feedback_v);
     assert_eq!(floored.affine_v, at_floor.affine_v);
 
     // A floor below the grid minimum falls back to the grid minimum.
-    let low = run([0.0; 4], false);
+    let low = run(stopped, false);
     let mut ctrl = ControllerState::new();
-    ctrl.set_min_rps(1.0);
-    let sensors = SensorData { motor_rps: [0.0; 4], ..make_hover_sensors(16.8) };
+    ctrl.set_min_rps(RotPerSec::new(1.0));
+    let sensors = SensorData { motor_rps: stopped, ..make_hover_sensors(FULL) };
     let mut sp = make_hover_setpoint();
-    sp.rate_rps[1] = 0.1;
+    sp.rate_rps[1] = RotPerSec::new(0.1);
     ctrl.update(&sensors, &sp, &gains);
     assert_eq!(ctrl.telemetry().feedback_v, low.feedback_v);
 }
@@ -627,35 +649,35 @@ fn min_rps_floor_overrides_reported_speed() {
 // ── Allocation (idle floor / collective) ────────────────────────────────
 
 /// motorVel of the coefficient JSON (V per eRPM/600).
-fn k_omega() -> f32 {
-    common::plant::model().motor_vel as f32
+fn k_omega() -> VoltPerRps {
+    common::plant::model().motor_vel.lossy_into()
 }
 
-fn hover_voltages(throttle: f32, motor_rps: f32, min_rps: f32) -> ([f32; 4], LqrTelemetry) {
+fn hover_voltages(throttle: f32, motor_rps: RotPerSec, min_rps: RotPerSec) -> ([Volt; 4], LqrTelemetry) {
     let gains = load_test_gains();
     let mut ctrl = ControllerState::new();
     ctrl.set_min_rps(min_rps);
-    let sensors = SensorData { motor_rps: [motor_rps; 4], ..make_hover_sensors(16.8) };
+    let sensors = SensorData { motor_rps: [motor_rps; 4], ..make_hover_sensors(FULL) };
     let sp = SetpointData { throttle, ..make_hover_setpoint() };
     let out = ctrl.update(&sensors, &sp, &gains);
-    (out.motor_duty.map(|d| d * 16.8), *ctrl.telemetry())
+    (out.motor_duty.map(|d| d * FULL), *ctrl.telemetry())
 }
 
 #[test]
 fn blob_has_motor_drag() {
     let gains = load_test_gains();
-    assert!((gains.motor_drag[0] - k_omega()).abs() < 1e-9);
-    assert!((gains.motor_drag[1] - k_omega_sq()).abs() < 1e-12);
+    assert!((gains.motor_drag.k_w - k_omega()).abs() < VoltPerRps::new(1e-9));
+    assert!((gains.motor_drag.k_w2 - k_omega_sq()).abs() < VoltPerRpsSq::new(1e-12));
 }
 
 #[test]
 fn zero_throttle_idles_at_linearization_floor() {
-    let floor = 120.0;
+    let floor = RotPerSec::new(120.0);
     let (v, telem) = hover_voltages(0.0, floor, floor);
     let idle = k_omega() * floor + k_omega_sq() * floor * floor;
-    let lowest = v.iter().cloned().fold(f32::INFINITY, f32::min);
-    assert!((lowest - idle).abs() < 1e-3, "lowest motor {lowest} V, idle {idle} V ({v:?})");
-    assert!(telem.collective_v > 0.0, "idle should lift collective: {}", telem.collective_v);
+    let lowest = v.iter().fold(Volt::new(f32::INFINITY), |m, &x| m.min(x));
+    assert!((lowest - idle).abs() < Volt::new(1e-3), "lowest motor {lowest:?}, idle {idle:?} ({v:?})");
+    assert!(telem.collective_v > ZERO_V, "idle should lift collective: {:?}", telem.collective_v);
     assert_eq!(telem.command_scale, 1.0);
 }
 
@@ -682,19 +704,19 @@ fn hover_is_torque_free() {
     let (k_w, k_w2) = (k_omega(), k_omega_sq());
     for throttle in [0.05f32, 0.1, 0.2] {
         let mut ctrl = ControllerState::new();
-        let mut omega = [275.0f32; 4];
+        let mut omega = [HOVER_RPS; 4];
         for _ in 0..50 {
-            let sensors = SensorData { motor_rps: omega, ..make_hover_sensors(16.8) };
+            let sensors = SensorData { motor_rps: omega, ..make_hover_sensors(FULL) };
             let sp = SetpointData { throttle, ..make_hover_setpoint() };
-            let v = ctrl.update(&sensors, &sp, &gains).motor_duty.map(|d| d * 16.8);
+            let v = ctrl.update(&sensors, &sp, &gains).motor_duty.map(|d| d * FULL);
             omega = v.map(|v| (-k_w + (k_w * k_w + 4.0 * k_w2 * v).sqrt()) / (2.0 * k_w2));
         }
         let sq = omega.map(|w| w * w);
         let pitch = w_front * (sq[0] + sq[2]) - w_back * (sq[1] + sq[3]);
         let roll = w_left * (sq[0] + sq[1]) - w_right * (sq[2] + sq[3]);
-        let total: f32 = sq.iter().sum();
+        let total = sq[0] + sq[1] + sq[2] + sq[3];
         assert!(pitch.abs() < 1e-3 * total && roll.abs() < 1e-3 * total,
-                "throttle {throttle}: ω = {omega:?}, pitch {pitch}, roll {roll}");
+                "throttle {throttle}: ω = {omega:?}, pitch {pitch:?}, roll {roll:?}");
     }
 }
 
@@ -705,8 +727,10 @@ fn quantized_tables_are_views_into_blob() {
     let mut gains = GainStorage::new();
     assert_eq!(load_gains(blob, &mut gains), GainLoadResult::Ok);
     let range = blob.as_ptr_range();
-    for table in [gains.ki, gains.kd, gains.kp, gains.binv, gains.ref_model] {
-        assert!(range.contains(&table.data_ptr()), "table was copied");
+    let tables = [gains.ki.data_ptr(), gains.kd.data_ptr(), gains.kp.data_ptr(), gains.binv.data_ptr(),
+                  gains.ref_model.data_ptr()];
+    for ptr in tables {
+        assert!(range.contains(&ptr), "table was copied");
     }
 }
 

@@ -7,6 +7,9 @@
 
 use std::sync::OnceLock;
 
+use super::units::{Freq, Time};
+use whippyflight_control::types::RotPerSec;
+
 static DEFAULT_FIXTURE: &[u8] = include_bytes!("../../tools/airframes/meteor65_noise.bin");
 
 fn fixture() -> &'static [u8] {
@@ -16,31 +19,32 @@ fn fixture() -> &'static [u8] {
         Err(_) => DEFAULT_FIXTURE.to_vec(),
     })
 }
-const GYRO_LSB: f32 = 1e-5;
-const ERPM_LSB: f32 = 1e-3;
+const GYRO_LSB: RotPerSec = RotPerSec::new(1e-5);
+const ERPM_LSB: RotPerSec = RotPerSec::new(1e-3);
 const CHANNELS: usize = 7;
 
 pub struct Noise {
-    fs: f64,
-    frames: Vec<[f32; CHANNELS]>,
-    offset_s: f64,
+    fs: Freq,
+    /// Gyro [roll, pitch, yaw] then motor speeds [0..4].
+    frames: Vec<[RotPerSec; CHANNELS]>,
+    offset: Time,
     gyro_scale: f32,
     motor_scale: f32,
 }
 
 pub struct NoiseSample {
-    /// BF gyro axes [roll, pitch, yaw], rot/s.
-    pub gyro: [f32; 3],
+    /// BF gyro axes [roll, pitch, yaw].
+    pub gyro: [RotPerSec; 3],
     /// Motor speed telemetry, model rps.
-    pub motor: [f32; 4],
+    pub motor: [RotPerSec; 4],
 }
 
 impl Noise {
-    /// Start `offset_s` into the recording (it loops), with the gyro and
+    /// Start `offset` into the recording (it loops), with the gyro and
     /// motor-speed noise scaled separately.
-    pub fn new(offset_s: f64, gyro_scale: f32, motor_scale: f32) -> Self {
+    pub fn new(offset: Time, gyro_scale: f32, motor_scale: f32) -> Self {
         let fixture = fixture();
-        let fs = f32::from_le_bytes(fixture[0..4].try_into().unwrap()) as f64;
+        let fs = Freq::new(f32::from_le_bytes(fixture[0..4].try_into().unwrap()) as f64);
         let n = u32::from_le_bytes(fixture[4..8].try_into().unwrap()) as usize;
         let frames = (0..n)
             .map(|k| {
@@ -51,20 +55,20 @@ impl Noise {
                 })
             })
             .collect();
-        Self { fs, frames, offset_s, gyro_scale, motor_scale }
+        Self { fs, frames, offset, gyro_scale, motor_scale }
     }
 
-    pub fn duration_s(&self) -> f64 {
+    pub fn duration(&self) -> Time {
         self.frames.len() as f64 / self.fs
     }
 
-    /// Noise at time `t` s, linearly interpolated from the log rate.
-    pub fn at(&self, t: f64) -> NoiseSample {
+    /// Noise at time `t`, linearly interpolated from the log rate.
+    pub fn at(&self, t: Time) -> NoiseSample {
         let n = self.frames.len();
-        let x = ((t + self.offset_s) * self.fs).rem_euclid(n as f64);
+        let x = f64::from((t + self.offset) * self.fs).rem_euclid(n as f64);
         let (i, f) = (x as usize % n, (x - x.floor()) as f32);
         let (a, b) = (self.frames[i], self.frames[(i + 1) % n]);
-        let v: [f32; CHANNELS] = core::array::from_fn(|c| {
+        let v: [RotPerSec; CHANNELS] = core::array::from_fn(|c| {
             (if c < 3 { self.gyro_scale } else { self.motor_scale }) * (a[c] + f * (b[c] - a[c]))
         });
         NoiseSample { gyro: [v[0], v[1], v[2]], motor: [v[3], v[4], v[5], v[6]] }

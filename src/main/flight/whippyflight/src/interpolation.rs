@@ -4,14 +4,15 @@
 //! order).  At runtime we interpolate across the 16 vertices of the
 //! surrounding 4-cube to get smooth gain variation.
 //!
-//! The interpolation works on raw f32 arrays internally (see
-//! [`GainTable::blend`]) but returns typed `MixedUnitMatrix` values — the
-//! `from_nalgebra` wrapping is zero-cost (`PhantomData` only).
+//! Each table holds quantities of its gain's unit (see [`GainTable::blend`]);
+//! the interpolated entries are gauged into typed `MixedUnitMatrix` values,
+//! which checks at compile time that every table feeds the matrix of its unit.
 
-use crate::gains::{GainStorage, GainTable, REF_FLOATS};
+use crate::gains::{GainStorage, GainTable, ReferenceModel, TableEntry, REF_FLOATS};
 use crate::types::*;
 
 use nalgebra::SMatrix;
+use whippyalgebra::nalgebra::UniformUnitMatrix;
 
 /// Interpolated gain set at a single operating point, fully typed.
 pub struct InterpolatedGains {
@@ -19,9 +20,8 @@ pub struct InterpolatedGains {
     pub kd: KdMatrix,
     pub kp: KpMatrix,
     pub binv: BInvMatrix,
-    /// Reference-model terms (see [`crate::gains::REF_FLOATS`]); zero when
-    /// the blob has no reference model.
-    pub ref_model: [f32; REF_FLOATS],
+    /// Reference-model terms; zero when the blob has no reference model.
+    pub ref_model: ReferenceModel,
 }
 
 impl InterpolatedGains {
@@ -31,13 +31,9 @@ impl InterpolatedGains {
             kd: KdMatrix::from_nalgebra(SMatrix::zeros()),
             kp: KpMatrix::from_nalgebra(SMatrix::zeros()),
             binv: BInvMatrix::from_nalgebra(SMatrix::zeros()),
-            ref_model: [0.0; REF_FLOATS],
+            ref_model: ReferenceModel::from_slots(&[0.0; REF_FLOATS]),
         }
     }
-}
-
-fn clampf(x: f32, min: f32, max: f32) -> f32 {
-    if x < min { min } else if x > max { max } else { x }
 }
 
 /// The 16 hypercube vertices around an operating point: grid-point index
@@ -66,22 +62,23 @@ impl Vertices {
     }
 
     /// Weighted sum of a table with `W` values per grid point.
-    fn interpolate<const W: usize>(&self, table: &GainTable) -> [f32; W] {
+    fn interpolate<E: TableEntry, const W: usize>(&self, table: &GainTable<E>) -> [E; W] {
         table.blend::<W>(&self.flat, &self.weight)
-    }
-
-    /// Interpolate a 4×3 (motor × axis) gain table.
-    fn interpolate_4x3(&self, table: &GainTable) -> SMatrix<f32, 4, 3> {
-        SMatrix::<f32, 4, 3>::from_row_slice(&self.interpolate::<12>(table))
     }
 }
 
+/// A 4×3 (motor × axis) table's interpolated entries as a uniform matrix,
+/// ready to gauge into the gain's mixed-unit type.
+macro_rules! interpolate_4x3 {
+    ($vertices:expr, $table:expr) => {{
+        let entries = $vertices.interpolate::<_, 12>(&$table);
+        UniformUnitMatrix::<_, SMatrix<f32, 4, 3>>::from_fn(|i, j| entries[3 * i + j]).gauge()
+    }};
+}
+
 /// Interpolate gains at the given motor speeds (in model units).
-///
-/// Returns fully typed `MixedUnitMatrix` gain matrices — the wrapping is
-/// zero-cost since `MixedUnitMatrix` is `PhantomData` over `SMatrix`.
 pub fn interpolate_gains(
-    motor_rps: &[f32; 4],
+    motor_rps: &[RotPerSec; 4],
     storage: &GainStorage,
 ) -> InterpolatedGains {
     let header = &storage.header;
@@ -93,8 +90,8 @@ pub fn interpolate_gains(
     let mut frac = [0.0f32; 4];
 
     for m in 0..4 {
-        let clamped = clampf(motor_rps[m], header.min_rps, header.max_rps);
-        let continuous_idx = (clamped - header.min_rps) / step;
+        let clamped = motor_rps[m].clamp(header.min_rps, header.max_rps);
+        let continuous_idx: f32 = ((clamped - header.min_rps) / step).into();
         let fi = continuous_idx as usize;
         floor_idx[m] = if fi >= max_idx { max_idx - 1 } else { fi };
         frac[m] = continuous_idx - floor_idx[m] as f32;
@@ -103,14 +100,14 @@ pub fn interpolate_gains(
     let vertices = Vertices::new(n, &floor_idx, &frac);
 
     InterpolatedGains {
-        ki: KiMatrix::from_nalgebra(vertices.interpolate_4x3(&storage.ki)),
-        kd: KdMatrix::from_nalgebra(vertices.interpolate_4x3(&storage.kd)),
-        kp: KpMatrix::from_nalgebra(vertices.interpolate_4x3(&storage.kp)),
-        binv: BInvMatrix::from_nalgebra(vertices.interpolate_4x3(&storage.binv)),
-        ref_model: if storage.has_ref_model {
-            vertices.interpolate::<REF_FLOATS>(&storage.ref_model)
+        ki: interpolate_4x3!(vertices, storage.ki),
+        kd: interpolate_4x3!(vertices, storage.kd),
+        kp: interpolate_4x3!(vertices, storage.kp),
+        binv: interpolate_4x3!(vertices, storage.binv),
+        ref_model: ReferenceModel::from_slots(&if storage.has_ref_model {
+            vertices.interpolate::<f32, REF_FLOATS>(&storage.ref_model)
         } else {
             [0.0; REF_FLOATS]
-        },
+        }),
     }
 }

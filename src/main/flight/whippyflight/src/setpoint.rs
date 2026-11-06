@@ -33,44 +33,48 @@
 //! them, and the motors' spin-down lag then carries the airframe past it.
 
 use crate::gains::GainStorage;
+use crate::types::*;
+
+use whippyunits::api::rescale_f32;
+use whippyunits::{quantity, value};
 
 /// λ at a 500 Hz link; see the closed-loop study in
 /// `tests/eval_setpoint_reconstruction.rs`.
 pub const DEFAULT_LAMBDA_500HZ: f32 = 8.0;
-/// Target slew limit, rot/s² (an angular-acceleration bound), used when the
-/// gain blob carries none.  `gen_wfg` sets the blob's from the airframe:
+/// Target slew limit (an angular-acceleration bound), used when the gain
+/// blob carries none.  `gen_wfg` sets the blob's from the airframe:
 /// 0.83 × the weakest pitch/roll direction's peak angular acceleration
 /// (opposing motors at full battery and idle, from hover), so it only clips
 /// targets the airframe cannot follow.  This is that value for the legacy
 /// 1S regression airframe (weakest 120 rot/s²).
-pub const DEFAULT_TARGET_SLEW_RPS2: f32 = 100.0;
-/// Target jerk limit, rot/s³, used when the gain blob carries none.  The
-/// blob's is 0.63 × the weakest pitch/roll jerk authority at hover (motor
-/// slew × thrust slope); the fraction was tuned with
+pub const DEFAULT_TARGET_SLEW_RPS2: RotPerSecSq = RotPerSecSq::new(100.0);
+/// Target jerk limit, used when the gain blob carries none.  The blob's is
+/// 0.63 × the weakest pitch/roll jerk authority at hover (motor slew ×
+/// thrust slope); the fraction was tuned with
 /// `tests/eval_feedforward.rs` (1–4 rot/s flicks within 3% overshoot) on the
 /// legacy airframe (8000 rot/s³), which this default is.
-pub const DEFAULT_TARGET_JERK_RPS3: f32 = 5000.0;
+pub const DEFAULT_TARGET_JERK_RPS3: RotPerSecCu = RotPerSecCu::new(5000.0);
 
-const REFERENCE_PERIOD_S: f32 = 1.0 / 500.0;
+const REFERENCE_PERIOD_S: Seconds = Seconds::new(1.0 / 500.0);
 /// Past this many RX periods without a packet the estimate stops
 /// extrapolating, and the next packet reseeds it (link loss, not a drop).
 const MAX_HOLD_PERIODS: f32 = 3.0;
 
 pub struct SetpointEstimator {
     lambda_ref: f32,
-    max_slew: f32,
-    max_jerk: f32,
-    period_s: f32,
+    max_slew: RotPerSecSq,
+    max_jerk: RotPerSecCu,
+    period_s: Seconds,
     alpha: f32,
     beta: f32,
-    x: [f32; 3],
-    v: [f32; 3],
-    packet_us: u32,
+    x: [RotPerSec; 3],
+    v: [RotPerSecSq; 3],
+    packet_us: Micros,
     seeded: bool,
-    target: [f32; 3],
+    target: [RotPerSec; 3],
     target_valid: bool,
-    /// d(target)/dt, rot/s².
-    target_v: [f32; 3],
+    /// d(target)/dt.
+    target_v: [RotPerSecSq; 3],
 }
 
 impl SetpointEstimator {
@@ -79,26 +83,26 @@ impl SetpointEstimator {
             lambda_ref: DEFAULT_LAMBDA_500HZ,
             max_slew: DEFAULT_TARGET_SLEW_RPS2,
             max_jerk: DEFAULT_TARGET_JERK_RPS3,
-            period_s: 0.0,
+            period_s: Seconds::new(0.0),
             alpha: 1.0,
             beta: 0.0,
-            x: [0.0; 3],
-            v: [0.0; 3],
-            packet_us: 0,
+            x: [RotPerSec::new(0.0); 3],
+            v: [RotPerSecSq::new(0.0); 3],
+            packet_us: Micros::new(0),
             seeded: false,
-            target: [0.0; 3],
+            target: [RotPerSec::new(0.0); 3],
             target_valid: false,
-            target_v: [0.0; 3],
+            target_v: [RotPerSecSq::new(0.0); 3],
         }
     }
 
-    /// λ at a 500 Hz link, and the target's slew (rot/s²) and jerk (rot/s³)
-    /// limits.  A jerk limit ≤ 0 leaves only the slew limit.
-    pub fn configure(&mut self, lambda_500hz: f32, max_target_slew_rps2: f32, max_target_jerk_rps3: f32) {
+    /// λ at a 500 Hz link, and the target's slew and jerk limits.  A jerk
+    /// limit ≤ 0 leaves only the slew limit.
+    pub fn configure(&mut self, lambda_500hz: f32, max_target_slew: RotPerSecSq, max_target_jerk: RotPerSecCu) {
         self.lambda_ref = lambda_500hz;
-        self.max_slew = max_target_slew_rps2;
-        self.max_jerk = max_target_jerk_rps3;
-        self.period_s = 0.0;
+        self.max_slew = max_target_slew;
+        self.max_jerk = max_target_jerk;
+        self.period_s = Seconds::new(0.0);
     }
 
     /// The default λ with the gain blob's target limits, falling back to
@@ -108,67 +112,67 @@ impl SetpointEstimator {
         self.configure(DEFAULT_LAMBDA_500HZ, slew, jerk);
     }
 
-    /// A new RX packet: raw (unsmoothed) setpoint in rot/s [roll, pitch,
-    /// yaw], its arrival time, and the current RX period estimate.
-    pub fn packet(&mut self, rate_rps: [f32; 3], time_us: u32, rx_period_s: f32) {
-        if rx_period_s <= 0.0 {
+    /// A new RX packet: raw (unsmoothed) setpoint [roll, pitch, yaw], its
+    /// arrival time, and the current RX period estimate.
+    pub fn packet(&mut self, rate: [RotPerSec; 3], time: Micros, rx_period: Seconds) {
+        if rx_period <= Seconds::new(0.0) {
             return;
         }
-        let change = rx_period_s - self.period_s;
+        let change = rx_period - self.period_s;
         if change > 0.01 * self.period_s || change < -0.01 * self.period_s {
-            self.set_period(rx_period_s);
+            self.set_period(rx_period);
         }
-        let gap = elapsed_s(self.packet_us, time_us);
+        let gap = elapsed(self.packet_us, time);
         if !self.seeded || gap > MAX_HOLD_PERIODS * self.period_s {
-            self.x = rate_rps;
-            self.v = [0.0; 3];
+            self.x = rate;
+            self.v = [RotPerSecSq::new(0.0); 3];
             self.seeded = true;
         } else {
             for i in 0..3 {
                 let predicted = self.x[i] + self.v[i] * gap;
-                let innovation = rate_rps[i] - predicted;
+                let innovation = rate[i] - predicted;
                 self.x[i] = predicted + self.alpha * innovation;
                 self.v[i] += self.beta / self.period_s * innovation;
             }
         }
-        self.packet_us = time_us;
+        self.packet_us = time;
     }
 
-    /// Per-tick setpoint r(t) and slew/jerk-limited feedforward target, both
-    /// in rot/s.
-    pub fn tick(&mut self, now_us: u32, dt: f32) -> ([f32; 3], [f32; 3]) {
+    /// Per-tick setpoint r(t) and slew/jerk-limited feedforward target.
+    pub fn tick(&mut self, now: Micros, dt: Seconds) -> ([RotPerSec; 3], [RotPerSec; 3]) {
         if !self.seeded {
-            return ([0.0; 3], [0.0; 3]);
+            return Default::default();
         }
         let hold = MAX_HOLD_PERIODS * self.period_s;
-        let since = elapsed_s(self.packet_us, now_us).min(hold);
-        let mut rate = [0.0; 3];
-        let mut target = [0.0; 3];
+        let since = elapsed(self.packet_us, now).min(hold);
+        let mut rate = [RotPerSec::new(0.0); 3];
+        let mut target = [RotPerSec::new(0.0); 3];
         let step = self.max_slew * dt;
         for i in 0..3 {
             rate[i] = self.x[i] + self.v[i] * since;
             let wanted = rate[i];
             target[i] = if !self.target_valid {
                 wanted
-            } else if self.max_jerk > 0.0 {
+            } else if self.max_jerk > RotPerSecCu::new(0.0) {
                 // Head for `wanted` at the slope from which the jerk limit
                 // still brakes to a stop on it; land on it once reached.
                 // Every jump of the goal goes through this, small ones too:
                 // the feedforward inverts the target over h ticks, so a
                 // target whose slope steps turns into a voltage spike.
                 let err = wanted - self.target[i];
-                let brake = clamp(sqrt(2.0 * self.max_jerk * abs(err)), 0.0, self.max_slew);
+                let brake = (2.0 * self.max_jerk * err.abs()).sqrt().clamp(RotPerSecSq::new(0.0), self.max_slew);
                 let dv = self.max_jerk * dt;
-                self.target_v[i] += clamp(if err < 0.0 { -brake } else { brake } - self.target_v[i], -dv, dv);
+                let toward = if err < RotPerSec::new(0.0) { -brake } else { brake };
+                self.target_v[i] += (toward - self.target_v[i]).clamp(-dv, dv);
                 let next = self.target[i] + self.target_v[i] * dt;
-                if (next - wanted) * (self.target[i] - wanted) <= 0.0 {
-                    self.target_v[i] = clamp(self.v[i], -abs(self.target_v[i]), abs(self.target_v[i]));
+                if (next - wanted) * (self.target[i] - wanted) <= RotSqPerSecSq::new(0.0) {
+                    self.target_v[i] = self.v[i].clamp(-self.target_v[i].abs(), self.target_v[i].abs());
                     wanted
                 } else {
                     next
                 }
             } else {
-                self.target[i] + clamp(wanted - self.target[i], -step, step)
+                self.target[i] + (wanted - self.target[i]).clamp(-step, step)
             };
         }
         self.target = target;
@@ -176,9 +180,9 @@ impl SetpointEstimator {
         (rate, target)
     }
 
-    fn set_period(&mut self, period_s: f32) {
-        self.period_s = period_s;
-        let ratio = period_s / REFERENCE_PERIOD_S;
+    fn set_period(&mut self, period: Seconds) {
+        self.period_s = period;
+        let ratio: f32 = (period / REFERENCE_PERIOD_S).into();
         let (alpha, beta) = kalata_gains(self.lambda_ref * ratio * ratio);
         self.alpha = alpha;
         self.beta = beta;
@@ -194,36 +198,22 @@ pub fn kalata_gains(lambda: f32) -> (f32, f32) {
 }
 
 /// The target `(slew, jerk)` limits a gain blob selects.
-pub fn target_limits(gains: &GainStorage) -> (f32, f32) {
-    let [slew, jerk] = gains.target_limits;
+pub fn target_limits(gains: &GainStorage) -> (RotPerSecSq, RotPerSecCu) {
+    let limits = gains.target_limits;
     (
-        if slew > 0.0 { slew } else { DEFAULT_TARGET_SLEW_RPS2 },
-        if jerk > 0.0 { jerk } else { DEFAULT_TARGET_JERK_RPS3 },
+        if limits.slew > RotPerSecSq::new(0.0) { limits.slew } else { DEFAULT_TARGET_SLEW_RPS2 },
+        if limits.jerk > RotPerSecCu::new(0.0) { limits.jerk } else { DEFAULT_TARGET_JERK_RPS3 },
     )
 }
 
-fn elapsed_s(from_us: u32, to_us: u32) -> f32 {
-    to_us.wrapping_sub(from_us) as f32 * 1e-6
+/// Time between two readings of the wrapping microsecond clock.
+fn elapsed(from: Micros, to: Micros) -> Seconds {
+    let us = value!(to, us, u32).wrapping_sub(value!(from, us, u32));
+    rescale_f32(quantity!(us as f32, us, f32))
 }
 
-fn abs(x: f32) -> f32 {
-    if x < 0.0 { -x } else { x }
-}
-
-fn clamp(x: f32, lo: f32, hi: f32) -> f32 {
-    if x < lo { lo } else if x > hi { hi } else { x }
-}
-
-/// Newton's method; `core` has no f32::sqrt.
 pub(crate) fn sqrt(x: f32) -> f32 {
-    if x <= 0.0 {
-        return 0.0;
-    }
-    let mut y = f32::from_bits((x.to_bits() >> 1) + 0x1FBD_1DF5);
-    for _ in 0..4 {
-        y = 0.5 * (y + x / y);
-    }
-    y
+    if x <= 0.0 { 0.0 } else { libm::sqrtf(x) }
 }
 
 impl Default for SetpointEstimator {

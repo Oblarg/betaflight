@@ -9,6 +9,9 @@
 //! units (rot/s, V).  The C glue layer in BF is responsible for converting
 //! from BF's native units (deg/s, centivolts, eRPM) before calling these
 //! functions.  See the conversion constants in [`crate::types`].
+//!
+//! Quantity arguments are `#[repr(transparent)]` over their storage, so they
+//! cross the C ABI exactly as the `float`/`uint32_t` the glue declares.
 
 use core::cell::UnsafeCell;
 use core::mem::MaybeUninit;
@@ -101,13 +104,13 @@ pub unsafe extern "C" fn whippyflight_init(
 }
 
 /// Feed one RX packet to the setpoint estimator: the raw (unsmoothed) rate
-/// setpoint in rot/s [roll, pitch, yaw], the packet's arrival time, and the
-/// current RX period estimate in seconds.
+/// setpoint [roll, pitch, yaw], the packet's arrival time, and the current
+/// RX period estimate.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn whippyflight_setpoint_packet(
-    rate_rps: *const f32,
-    time_us: u32,
-    rx_period_s: f32,
+    rate_rps: *const RotPerSec,
+    time_us: Micros,
+    rx_period_s: Seconds,
 ) {
     let rate = unsafe { core::slice::from_raw_parts(rate_rps, 3) };
     unsafe { SETPOINT.get_mut() }.packet([rate[0], rate[1], rate[2]], time_us, rx_period_s);
@@ -120,7 +123,7 @@ pub unsafe extern "C" fn whippyflight_setpoint_packet(
 pub unsafe extern "C" fn whippyflight_update(
     sensors: *const SensorData,
     throttle: f32,
-    now_us: u32,
+    now_us: Micros,
 ) -> ControlOutput {
     let sensors = unsafe { &*sensors };
     let ctrl = unsafe { controller_mut() };
@@ -136,7 +139,7 @@ pub unsafe extern "C" fn whippyflight_update(
 /// motor speeds are clamped up to `max(rps, grid min_rps)` before gain
 /// lookup and the affine linearizer; gains diverge as ω → 0.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn whippyflight_set_min_rps(rps: f32) {
+pub unsafe extern "C" fn whippyflight_set_min_rps(rps: RotPerSec) {
     unsafe { controller_mut() }.set_min_rps(rps);
 }
 

@@ -40,11 +40,23 @@
 //!
 //! Key layout guarantee: `Quantity<U, f32>` is `#[repr(transparent)]` over
 //! `f32`, and `MixedUnitMatrix` carries only `PhantomData` alongside its inner
-//! `SMatrix`.  Everything erases to raw floats at compile time.
+//! `SMatrix`.  Everything erases to raw floats at compile time, so the
+//! `#[repr(C)]` structs below have the same layout as their C declarations
+//! (plain `float` arrays) even though every field is a typed quantity.
+//!
+//! Dimensionless values (duty, throttle, scales, ratios, filter
+//! coefficients) stay plain `f32`.  So does the accelerometer reading: it is
+//! specific force as a multiple of standard gravity g₀, a ratio, because
+//! g₀ = 9.80665 m/s² is not a power-of-2·3·5·π multiple of m/s² and so has
+//! no storage unit.
 
 use whippyalgebra::dims;
-use whippyalgebra::nalgebra::MixedUnitMatrix;
+use whippyalgebra::nalgebra::{MixedUnitMatrix, UniformUnitMatrix};
 use nalgebra::SMatrix;
+use nalgebra::{Const, Matrix, U1};
+use whippyalgebra::nalgebra::__backend::RawStorage;
+use whippyalgebra::{CollapseUniform, DimList, FromRaw, GaugeReproduces, Uniform};
+use whippyunits::{qty, DivUnit, Quantity, UnitDiv};
 
 // Re-export for use in other modules
 pub use whippyalgebra::nalgebra as nalgebra;
@@ -53,27 +65,26 @@ pub use whippyalgebra::nalgebra as nalgebra;
 // BF ↔ Rust conversion constants
 //
 // These are provided so the C glue layer (and unit tests) can convert from
-// Betaflight's native units to WhippyFlight's clean units.
+// Betaflight's native units to WhippyFlight's clean units.  Each is the
+// value of one BF count: multiply the BF value by it.
 // ---------------------------------------------------------------------------
 
-/// BF gyro/setpoint deg/s → rot/s.  Multiply BF value by this.
-pub const BF_DPS_TO_RPS: f32 = 1.0 / 360.0;
+/// One BF gyro/setpoint count (1 deg/s), in rot/s.
+pub const BF_DPS_TO_RPS: RotPerSec = RotPerSec::new(1.0 / 360.0);
 
-/// BF battery centivolts (uint16) → volts (f32).  Multiply by this.
-pub const BF_CENTIVOLTS_TO_V: f32 = 0.01;
+/// One BF battery count (1 centivolt), in volts.
+pub const BF_CENTIVOLTS_TO_V: Volt = Volt::new(0.01);
 
-/// BF eRPM/100 → mechanical RPM.  Multiply BF value by this, then
-/// divide by 60 to get rot/s.  Requires motor pole count.
-///
-/// `rot_per_sec = (erpm_lsb * BF_ERPM_LSB * 2.0 / pole_count) / 60.0`
+/// One BF eRPM/100 telemetry count, in eRPM.  Mechanical rot/s is
+/// `erpm_lsb * BF_ERPM_LSB * 2.0 / pole_count / 60.0`.
 pub const BF_ERPM_LSB: f32 = 100.0;
 
-/// BF eRPM/100 telemetry LSB → model motor speed (eRPM/600).
+/// One BF eRPM/100 telemetry count, in model motor speed (eRPM/600).
 ///
 /// The regression (main.R) defines motor speed as the blackbox eRPM field
 /// divided by 6, so all fitted coefficients and the gain grid are in this
 /// unit regardless of motor pole count.
-pub const BF_ERPM_LSB_TO_MODEL_RPS: f32 = 1.0 / 6.0;
+pub const BF_ERPM_LSB_TO_MODEL_RPS: RotPerSec = RotPerSec::new(1.0 / 6.0);
 
 // ---------------------------------------------------------------------------
 // Dimension lists
@@ -161,18 +172,69 @@ pub type MotorSpeedSqVec = MixedUnitMatrix<MotorSpeedSqAxes, Scalar, SMatrix<f32
 // Scalar quantity aliases
 // ---------------------------------------------------------------------------
 
-/// A rotation rate in rot/s.
-pub type RotPerSec = whippyunits::qty!(rot / s);
+/// A rotation rate in rot/s (also motor speed, in model units).
+pub type RotPerSec = qty!(rot / s, f32);
 /// A rotation (integrated angle) in rot.
-pub type Rotation = whippyunits::qty!(rot);
-/// A rotation rate derivative in rot/s².
-pub type RotPerSecSq = whippyunits::qty!(rot / s ^ 2);
+pub type Rotation = qty!(rot, f32);
+/// Angular acceleration in rot/s².
+pub type RotPerSecSq = qty!(rot / s ^ 2, f32);
+/// Angular jerk in rot/s³.
+pub type RotPerSecCu = qty!(rot / s ^ 3, f32);
+/// A signed squared motor speed ω|ω| in rot²/s².
+pub type RotSqPerSecSq = qty!(rot ^ 2 / s ^ 2, f32);
 /// A voltage in V.
-pub type Volt = whippyunits::qty!(V);
+pub type Volt = qty!(V, f32);
 /// A time duration in s.
-pub type Seconds = whippyunits::qty!(s);
-/// Dimensionless scalar.
-pub type Dimensionless = whippyunits::qty!(1);
+pub type Seconds = qty!(s, f32);
+/// A timestamp on BF's free-running microsecond clock (wraps).
+pub type Micros = qty!(us, u32);
+/// A frequency in Hz.
+pub type Hertz = qty!(Hz, f32);
+/// Voltage per rotation rate, V·s/rot (Kp, G_h⁺, motor drag k_ω).
+pub type VoltPerRps = qty!(V * s / rot, f32);
+/// Voltage per signed squared speed, V·s²/rot² (G, motor drag k_ω²).
+pub type VoltPerRpsSq = qty!(V * s ^ 2 / rot ^ 2, f32);
+/// Voltage per rotation, V/rot (Ki).
+pub type VoltPerRot = qty!(V / rot, f32);
+/// Voltage per angular acceleration, V·s²/rot (Kd).
+pub type VoltPerRpsPerSec = qty!(V * s ^ 2 / rot, f32);
+/// Rotation rate per volt over one tick, rot/(s·V) (the reference model's Bd).
+pub type RpsPerVolt = qty!(rot / s / V, f32);
+
+// ---------------------------------------------------------------------------
+// Vector ↔ array conversion
+// ---------------------------------------------------------------------------
+
+/// A uniform column vector (e.g. [`PropErrorVec`], [`MotorVoltageVec`]) from
+/// its entries; the expected type picks the dimension lists, whose entry
+/// unit must be the entries'.
+pub fn from_array<U, Rows, Cols, const N: usize>(
+    entries: [Quantity<U, f32>; N],
+) -> MixedUnitMatrix<Rows, Cols, SMatrix<f32, N, 1>>
+where
+    U: Clone,
+    Rows: DimList + CollapseUniform,
+    Cols: DimList + CollapseUniform,
+    Uniform<Rows>: UnitDiv<Uniform<Cols>>,
+    DivUnit<Uniform<Rows>, Uniform<Cols>>: GaugeReproduces<U>,
+{
+    UniformUnitMatrix::<U, SMatrix<f32, N, 1>>::from_fn(|i, _| entries[i]).gauge()
+}
+
+/// The entries of a uniform column vector.
+pub fn to_array<Rows, Cols, S, const N: usize>(
+    v: &MixedUnitMatrix<Rows, Cols, Matrix<f32, Const<N>, U1, S>>,
+) -> [Quantity<DivUnit<Uniform<Rows>, Uniform<Cols>>, f32>; N]
+where
+    Rows: CollapseUniform,
+    Cols: CollapseUniform,
+    Uniform<Rows>: UnitDiv<Uniform<Cols>>,
+    S: RawStorage<f32, Const<N>, U1>,
+    Quantity<DivUnit<Uniform<Rows>, Uniform<Cols>>, f32>: FromRaw<f32>,
+{
+    let u = v.as_uniform();
+    core::array::from_fn(|i| u.get(i, 0))
+}
 
 // ---------------------------------------------------------------------------
 // FFI-boundary types (C-compatible)
@@ -187,25 +249,27 @@ pub type Dimensionless = whippyunits::qty!(1);
 /// Axis order: `[roll, pitch, yaw]` (matches BF's `FD_ROLL=0, FD_PITCH=1, FD_YAW=2`).
 /// Motor order: `[REAR_R, FRONT_R, REAR_L, FRONT_L]` (matches BF's QUADX mixer).
 #[repr(C)]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
+#[cfg_attr(feature = "std", derive(Debug))]
 pub struct SensorData {
     /// Gyro rates in rot/s: [roll, pitch, yaw].
     ///
     /// C glue converts from BF's `gyro.gyroADCf[axis]` (deg/s):
     /// `gyro_rps[i] = gyro.gyroADCf[i] * BF_DPS_TO_RPS`
-    pub gyro_rps: [f32; 3],
+    pub gyro_rps: [RotPerSec; 3],
     /// Motor speeds in the regression's speed unit (eRPM/600), by BF motor
     /// index.  This equals mechanical rot/s only for 20-pole motors.
     ///
     /// C glue converts from BF's DShot eRPM telemetry (eRPM/100 per LSB):
     /// `motor_rps[i] = getDshotErpm(i) * BF_ERPM_LSB_TO_MODEL_RPS`
-    pub motor_rps: [f32; 4],
+    pub motor_rps: [RotPerSec; 4],
     /// Battery voltage in volts.
     ///
     /// C glue converts from BF's `getBatteryVoltage()` (centivolts):
     /// `battery_voltage = getBatteryVoltage() * BF_CENTIVOLTS_TO_V`
-    pub battery_voltage: f32,
-    /// Body-frame specific force in g: [x, y, z] (BF accelerometer axes).
+    pub battery_voltage: Volt,
+    /// Body-frame specific force in g₀ (a ratio, see the module docs):
+    /// [x, y, z] (BF accelerometer axes).
     /// Only read by the airframe drag mode; zero without an accelerometer.
     ///
     /// C glue converts from BF's aligned `acc.accADC[axis]` (LSB):
@@ -219,14 +283,15 @@ pub struct SensorData {
 ///
 /// Axis order: `[roll, pitch, yaw]`.
 #[repr(C)]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
+#[cfg_attr(feature = "std", derive(Debug))]
 pub struct SetpointData {
     /// Desired attitude rates in rot/s: [roll, pitch, yaw].
     ///
     /// On the firmware path this is the [`crate::setpoint`] estimate r(t),
     /// built from BF's raw setpoint packets (`getRawSetpoint(axis)` deg/s
     /// × `BF_DPS_TO_RPS`).
-    pub rate_rps: [f32; 3],
+    pub rate_rps: [RotPerSec; 3],
     /// Throttle as a fraction [0, 1].
     ///
     /// Direct from `rcCommand[THROTTLE]` (already [0,1] in BF).
@@ -237,7 +302,8 @@ pub struct SetpointData {
 ///
 /// Motor order: `[REAR_R, FRONT_R, REAR_L, FRONT_L]` (matches BF's QUADX mixer).
 #[repr(C)]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
+#[cfg_attr(feature = "std", derive(Debug))]
 pub struct ControlOutput {
     /// Motor duty cycle fractions [0, 1]: [REAR_R, FRONT_R, REAR_L, FRONT_L].
     ///
@@ -251,30 +317,31 @@ pub struct ControlOutput {
 /// Axis order: `[roll, pitch, yaw]`.
 /// Motor order: `[REAR_R, FRONT_R, REAR_L, FRONT_L]`.
 #[repr(C)]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
+#[cfg_attr(feature = "std", derive(Debug))]
 pub struct LqrTelemetry {
     /// Per-motor feedback voltage: [REAR_R, FRONT_R, REAR_L, FRONT_L].
-    pub feedback_v: [f32; 4],
+    pub feedback_v: [Volt; 4],
     /// Per-motor feedforward voltage: [REAR_R, FRONT_R, REAR_L, FRONT_L].
-    pub feedforward_v: [f32; 4],
+    pub feedforward_v: [Volt; 4],
     /// Per-motor affine linearizer voltage: [REAR_R, FRONT_R, REAR_L, FRONT_L].
-    pub affine_v: [f32; 4],
+    pub affine_v: [Volt; 4],
     /// Proportional error: [roll, pitch, yaw] in rot/s.
-    pub error_prop: [f32; 3],
+    pub error_prop: [RotPerSec; 3],
     /// Integral error state: [roll, pitch, yaw] in rot.
-    pub error_integral: [f32; 3],
+    pub error_integral: [Rotation; 3],
     /// Derivative error state: [roll, pitch, yaw] in rot/s².
-    pub error_derivative: [f32; 3],
+    pub error_derivative: [RotPerSecSq; 3],
     /// Interpolated Kp diagonal (motor 0 / REAR_R): [roll, pitch, yaw].
-    pub kp_motor0: [f32; 3],
+    pub kp_motor0: [VoltPerRps; 3],
     /// Collective along the thrust-balanced direction (V, motor mean).
-    pub collective_v: f32,
+    pub collective_v: Volt,
     /// Attitude command scale applied by the allocator; 1 unless saturated.
     pub command_scale: f32,
     /// Rate setpoint the controller tracked: [roll, pitch, yaw] in rot/s.
-    pub setpoint_rps: [f32; 3],
+    pub setpoint_rps: [RotPerSec; 3],
     /// Feedforward's h-tick-ahead target: [roll, pitch, yaw] in rot/s.
-    pub ff_target_rps: [f32; 3],
+    pub ff_target_rps: [RotPerSec; 3],
     /// Status: 0 = no gains, 1 = gains loaded, 2 = gains corrupt.
     pub status: u8,
 }

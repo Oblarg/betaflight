@@ -16,6 +16,11 @@ crate-type = ["staticlib", "lib"]
 # Switch back to git deps for release/CI.
 whippyunits = { path = "../../../../../whippyunits", default-features = false }
 # Unit-safe linear algebra over nalgebra — no_std, no alloc
+# Correctly rounded sqrtf for no_std (core has none); already in the
+# dependency graph through whippyunits.
+libm = "0.2"
+# Zero-copy typed views of the gain blob's tables.
+bytemuck = { version = "1", default-features = false }
 whippyalgebra = { path = "../../../../../whippyunits/whippyalgebra", default-features = false, features = ["nalgebra"] }
 
 [dev-dependencies]

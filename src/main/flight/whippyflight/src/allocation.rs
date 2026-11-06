@@ -28,18 +28,22 @@
 //! command just created.  The interval logic below handles either sign of
 //! nᵢ; if no `(s, c)` exists at all, each motor is clipped to the range.
 
-use crate::setpoint::sqrt;
+use core::ops::{Add, Mul};
+
+use crate::gains::MotorDrag;
+use crate::types::*;
 
 /// Floor on |nᵢ| so the per-motor interval stays finite.
 const MIN_DIRECTION: f32 = 1e-3;
 
 /// Result of one allocation.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
+#[cfg_attr(feature = "std", derive(Debug))]
 pub struct Allocation {
     /// Per-motor voltage, within `[v_lo, v_hi]`.
-    pub voltage: [f32; 4],
-    /// Collective `c` along the balanced direction (V, mean over motors).
-    pub collective_v: f32,
+    pub voltage: [Volt; 4],
+    /// Collective `c` along the balanced direction (mean over motors).
+    pub collective_v: Volt,
     /// Command scale `s` ∈ [0, 1]; 1 unless the command didn't fit.
     pub command_scale: f32,
     /// Whether the realized attitude command differs from the request
@@ -62,42 +66,45 @@ pub struct Allocation {
 /// Without motor drag (pre-v4 blobs) n falls back to n ∝ b, duty ∝ speed.
 pub fn balanced_direction(
     balance: [f32; 4],
-    motor_drag: [f32; 2],
-    affine: &[f32; 16],
-    collective_v: f32,
+    motor_drag: MotorDrag,
+    affine: &[VoltPerRpsSq; 16],
+    collective_v: Volt,
 ) -> [f32; 4] {
-    let [k_w, k_w2] = motor_drag;
+    let MotorDrag { k_w, k_w2 } = motor_drag;
     let b2 = balance.map(|b| b * b);
     let q = [0, 1, 2, 3].map(|i| {
-        k_w2 * b2[i] - (0..4).map(|j| affine[i * 4 + j] * b2[j]).sum::<f32>()
+        k_w2 * b2[i] - (0..4).fold(VoltPerRpsSq::new(0.0), |sum, j| sum + affine[i * 4 + j] * b2[j])
     });
-    let mean = |x: [f32; 4]| 0.25 * (x[0] + x[1] + x[2] + x[3]);
-    let (a, lin, c) = (mean(q), k_w * mean(balance), max(collective_v, 0.0));
-    let w_bar = if a > 0.0 {
-        2.0 * c / (lin + sqrt(lin * lin + 4.0 * a * c))
-    } else if lin > 0.0 {
+    let (a, lin, c) = (mean(q), k_w * mean(balance), collective_v.max(Volt::new(0.0)));
+    let w_bar = if a > VoltPerRpsSq::new(0.0) {
+        2.0 * c / (lin + (lin * lin + 4.0 * a * c).sqrt())
+    } else if lin > VoltPerRps::new(0.0) {
         c / lin
     } else {
-        0.0
+        RotPerSec::new(0.0)
     };
+    // Vᵢ/ω̄, which has n's direction.
     let v = [0, 1, 2, 3].map(|i| k_w * balance[i] + q[i] * w_bar);
-    let (v, total) = if mean(v) > 0.0 { (v, mean(v)) } else { (balance, mean(balance)) };
-    if !(total > 0.0) {
-        return [1.0; 4];
-    }
-    v.map(|x| {
-        let x = x / total;
-        if abs(x) < MIN_DIRECTION { MIN_DIRECTION } else { x }
-    })
+    let v_mean = mean(v);
+    let n = if v_mean > VoltPerRps::new(0.0) {
+        v.map(|x| (x / v_mean).into())
+    } else {
+        let b_mean = mean(balance);
+        if !(b_mean > 0.0) {
+            return [1.0; 4];
+        }
+        balance.map(|b| b / b_mean)
+    };
+    n.map(|x: f32| if x.abs() < MIN_DIRECTION { MIN_DIRECTION } else { x })
 }
 
 /// Fit `command` into `[v_lo, v_hi]` per motor (see module docs).
 pub fn allocate(
-    command: [f32; 4],
+    command: [Volt; 4],
     neutral: [f32; 4],
-    pilot_collective: f32,
-    v_lo: f32,
-    v_hi: f32,
+    pilot_collective: Volt,
+    v_lo: Volt,
+    v_hi: Volt,
 ) -> Allocation {
     // Motor i admits c ∈ [lᵢ − s·pᵢ, hᵢ − s·pᵢ].
     let p = [0, 1, 2, 3].map(|i| command[i] / neutral[i]);
@@ -115,11 +122,11 @@ pub fn allocate(
         for j in 0..4 {
             let alpha = bounds[i].0 - bounds[j].1;
             let beta = p[j] - p[i];
-            if beta > 0.0 {
-                s_max = min(s_max, -alpha / beta);
-            } else if beta < 0.0 {
-                s_min = max(s_min, -alpha / beta);
-            } else if alpha > 0.0 {
+            if beta > Volt::new(0.0) {
+                s_max = min(s_max, (-alpha / beta).into());
+            } else if beta < Volt::new(0.0) {
+                s_min = max(s_min, (-alpha / beta).into());
+            } else if alpha > Volt::new(0.0) {
                 feasible = false;
             }
         }
@@ -138,8 +145,8 @@ pub fn allocate(
     }
 
     let s = s_max;
-    let lower = (0..4).fold(f32::NEG_INFINITY, |acc, i| max(acc, bounds[i].0 - s * p[i]));
-    let upper = (0..4).fold(f32::INFINITY, |acc, i| min(acc, bounds[i].1 - s * p[i]));
+    let lower = (0..4).fold(Volt::new(f32::NEG_INFINITY), |acc, i| acc.max(bounds[i].0 - s * p[i]));
+    let upper = (0..4).fold(Volt::new(f32::INFINITY), |acc, i| acc.min(bounds[i].1 - s * p[i]));
     let c = if lower <= upper {
         clamp(pilot_collective, lower, upper)
     } else {
@@ -154,8 +161,8 @@ pub fn allocate(
     }
 }
 
-fn abs(x: f32) -> f32 {
-    if x < 0.0 { -x } else { x }
+fn mean<Q: Copy + Add<Output = Q> + Mul<f32, Output = Q>>(x: [Q; 4]) -> Q {
+    (x[0] + x[1] + x[2] + x[3]) * 0.25
 }
 
 fn min(a: f32, b: f32) -> f32 {
@@ -166,6 +173,7 @@ fn max(a: f32, b: f32) -> f32 {
     if a > b { a } else { b }
 }
 
-fn clamp(x: f32, lo: f32, hi: f32) -> f32 {
-    max(lo, min(x, hi))
+/// Clamp that maps NaN to `hi`, so a NaN command still yields a valid voltage.
+fn clamp(x: Volt, lo: Volt, hi: Volt) -> Volt {
+    lo.max(x.min(hi))
 }

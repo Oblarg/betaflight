@@ -60,7 +60,12 @@
 //! controller then skips takeoff/landing detection and the trim-sized
 //! integral bound).
 
-use crate::types::GainLoadResult;
+use core::ops::{Add, Mul};
+
+use crate::types::*;
+use nalgebra::SMatrix;
+use whippyalgebra::nalgebra::UniformUnitMatrix;
+use whippyunits::qty;
 
 /// Magic bytes: "LQRG" in little-endian.
 const GAIN_MAGIC: u32 = 0x4C51_5247;
@@ -121,11 +126,62 @@ const GAIN_VERSION: u16 = 7;
 /// | 38     | `fh_rw` | 3×4   | h-tick free response, rate ← motor speed|
 pub const REF_FLOATS: usize = 50;
 
+/// The reference-model blocks of [`REF_FLOATS`] at one operating point,
+/// with their units.  Motor speeds and rates are both rot/s, so the
+/// rate ← speed blocks and every decay are dimensionless.
+#[derive(Clone, Copy)]
+pub struct ReferenceModel {
+    pub ad_rr: [f32; 3],
+    pub ad_rw: RateFromSpeedMatrix,
+    pub ad_ww: [f32; 4],
+    pub bd_r: RateFromVoltMatrix,
+    pub bd_w: [RpsPerVolt; 4],
+    pub fh_rr: [f32; 3],
+    pub fh_rw: RateFromSpeedMatrix,
+}
+
+impl ReferenceModel {
+    /// Decode the table slots (see [`REF_FLOATS`] for the layout).
+    pub fn from_slots(r: &[f32; REF_FLOATS]) -> Self {
+        let rate_from_speed = |o: usize| {
+            UniformUnitMatrix::<_, SMatrix<f32, 3, 4>>::from_fn(|i, j| {
+                <qty!(1, f32)>::new(r[o + 4 * i + j])
+            })
+            .gauge::<AttitudeAxes, MotorSpeedAxes>()
+        };
+        Self {
+            ad_rr: [r[0], r[1], r[2]],
+            ad_rw: rate_from_speed(3),
+            ad_ww: [r[15], r[16], r[17], r[18]],
+            bd_r: UniformUnitMatrix::<_, SMatrix<f32, 3, 4>>::from_fn(|i, j| {
+                RpsPerVolt::new(r[19 + 4 * i + j])
+            })
+            .gauge::<AttitudeAxes, MotorAxes>(),
+            bd_w: [31, 32, 33, 34].map(|o| RpsPerVolt::new(r[o])),
+            fh_rr: [r[35], r[36], r[37]],
+            fh_rw: rate_from_speed(38),
+        }
+    }
+}
+
 /// Floats in the affine linearizer block.
 pub const AFFINE_FLOATS: usize = 16;
 
 /// Floats in the motor block.
 pub const MOTOR_FLOATS: usize = 2;
+
+/// Steady-state motor drag, V = k_ω·ω + k_ω²·ω|ω| (main.R's motor fit
+/// without the k_α·ω̇ term).
+#[derive(Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "std", derive(Debug))]
+pub struct MotorDrag {
+    pub k_w: VoltPerRps,
+    pub k_w2: VoltPerRpsSq,
+}
+
+impl MotorDrag {
+    pub const ZERO: Self = Self { k_w: VoltPerRps::new(0.0), k_w2: VoltPerRpsSq::new(0.0) };
+}
 
 /// Floats in the thrust-balance block.
 pub const BALANCE_FLOATS: usize = 4;
@@ -140,11 +196,43 @@ pub const BALANCE_FLOATS: usize = 4;
 /// angular acceleration it causes.  `lp_hz = 0` turns the mode off.
 pub const DRAG_FLOATS: usize = 5;
 
+/// The airframe drag block, see [`DRAG_FLOATS`].  The accelerometer reads
+/// in g₀ (a ratio), so each coefficient is an angular acceleration per g₀.
+#[derive(Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "std", derive(Debug))]
+pub struct AirframeDrag {
+    pub lp: Hertz,
+    /// Roll angular acceleration per g₀ of body [x, y] specific force.
+    pub roll: [RotPerSecSq; 2],
+    /// Pitch angular acceleration per g₀ of body [x, y] specific force.
+    pub pitch: [RotPerSecSq; 2],
+}
+
+impl AirframeDrag {
+    pub const OFF: Self = Self {
+        lp: Hertz::new(0.0),
+        roll: [RotPerSecSq::new(0.0); 2],
+        pitch: [RotPerSecSq::new(0.0); 2],
+    };
+}
+
 /// Floats in the target-limit block (v7): the setpoint estimator's
 /// `[slew (rot/s²), jerk (rot/s³)]` bounds on the feedforward target, set
 /// from the airframe's pitch/roll authority (see
 /// [`crate::setpoint`]).  A value ≤ 0 selects the estimator's default.
 pub const TARGET_FLOATS: usize = 2;
+
+/// The target-limit block, see [`TARGET_FLOATS`].
+#[derive(Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "std", derive(Debug))]
+pub struct TargetLimits {
+    pub slew: RotPerSecSq,
+    pub jerk: RotPerSecCu,
+}
+
+impl TargetLimits {
+    pub const DEFAULT: Self = Self { slew: RotPerSecSq::new(0.0), jerk: RotPerSecCu::new(0.0) };
+}
 
 /// Floats in the hover block (v7): [hover rps, integral limit V] — the
 /// fitted airframe's median hover motor speed (model rps), for
@@ -178,22 +266,29 @@ const HEADER_SIZE: usize = 0x20;
 #[cfg(target_endian = "big")]
 compile_error!("the .wfg tables are little-endian and are read in place");
 
+/// A value a lookup table can hold: a quantity of the table's unit, or a
+/// bare `f32` for the reference-model table, whose slots differ in unit
+/// (decoded by [`ReferenceModel::from_slots`]).
+pub trait TableEntry: bytemuck::Pod + Default + Add<Output = Self> + Mul<f32, Output = Self> {}
+
+impl<T: bytemuck::Pod + Default + Add<Output = T> + Mul<f32, Output = T>> TableEntry for T {}
+
 /// Storage of one lookup table, read in place from the blob.
 #[derive(Clone, Copy)]
-enum TableData {
-    F32(&'static [f32]),
+enum TableData<E: 'static> {
+    F32(&'static [E]),
     /// value[i] = lo[i % W] + step[i % W] · q[i]
-    U16 { q: &'static [u16], lo: &'static [f32], step: &'static [f32] },
+    U16 { q: &'static [u16], lo: &'static [E], step: &'static [E] },
 }
 
 /// A lookup table with `width` values per grid point, indexed
 /// [grid point] · width + slot.
 #[derive(Clone, Copy)]
-pub struct GainTable {
-    data: TableData,
+pub struct GainTable<E: 'static> {
+    data: TableData<E>,
 }
 
-impl GainTable {
+impl<E: TableEntry> GainTable<E> {
     pub const EMPTY: Self = Self { data: TableData::F32(&[]) };
 
     pub fn len(&self) -> usize {
@@ -216,7 +311,7 @@ impl GainTable {
     }
 
     /// Decoded value at flat index `i`.
-    pub fn get(&self, i: usize) -> f32 {
+    pub fn get(&self, i: usize) -> E {
         match self.data {
             TableData::F32(v) => v[i],
             TableData::U16 { q, lo, step } => {
@@ -229,42 +324,42 @@ impl GainTable {
     /// Weighted sum over grid points of the `W` values at each, i.e.
     /// Σ_v weight[v] · table[point[v]·W + i].  The weights must sum to 1:
     /// quantized tables sum the raw codes and apply lo/step once per slot.
-    pub fn blend<const W: usize>(&self, point: &[usize], weight: &[f32]) -> [f32; W] {
-        let mut out = [0.0f32; W];
+    pub fn blend<const W: usize>(&self, point: &[usize], weight: &[f32]) -> [E; W] {
         match self.data {
             TableData::F32(v) => {
+                let mut out = [E::default(); W];
                 for (&p, &w) in point.iter().zip(weight) {
                     let row = &v[p * W..p * W + W];
                     for (o, &x) in out.iter_mut().zip(row) {
-                        *o += w * x;
+                        *o = *o + x * w;
                     }
                 }
+                out
             }
             TableData::U16 { q, lo, step } => {
+                let mut code = [0.0f32; W];
                 for (&p, &w) in point.iter().zip(weight) {
                     let row = &q[p * W..p * W + W];
-                    for (o, &x) in out.iter_mut().zip(row) {
+                    for (o, &x) in code.iter_mut().zip(row) {
                         *o += w * x as f32;
                     }
                 }
-                for ((o, &l), &s) in out.iter_mut().zip(lo).zip(step) {
-                    *o = l + s * *o;
-                }
+                core::array::from_fn(|i| lo[i] + step[i] * code[i])
             }
         }
-        out
     }
 }
 
 /// Parsed gain header.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
+#[cfg_attr(feature = "std", derive(Debug))]
 pub struct GainHeader {
     pub resolution: u8,
-    pub min_rps: f32,
-    pub max_rps: f32,
-    pub dt: f32,
-    pub integral_tau: f32,
-    pub derivative_tau: f32,
+    pub min_rps: RotPerSec,
+    pub max_rps: RotPerSec,
+    pub dt: Seconds,
+    pub integral_tau: Seconds,
+    pub derivative_tau: Seconds,
     /// Feedforward inversion horizon in ticks (v3; 0 when absent).
     pub ff_horizon: u8,
 }
@@ -278,41 +373,39 @@ pub struct GainStorage {
 
     // The 4 gain tables, each N⁴ × 12 values.  Indexed as
     // [((m0·N + m1)·N + m2)·N + m3] * 12 + motor * 3 + axis
-    pub ki: GainTable,
-    pub kd: GainTable,
-    pub kp: GainTable,
-    pub binv: GainTable,
+    pub ki: GainTable<VoltPerRot>,
+    pub kd: GainTable<VoltPerRpsPerSec>,
+    pub kp: GainTable<VoltPerRps>,
+    pub binv: GainTable<VoltPerRps>,
 
     /// Reference-model table, [grid point] * REF_FLOATS + offset; empty
     /// when the blob has none (v1–v2).
-    pub ref_model: GainTable,
+    pub ref_model: GainTable<f32>,
     /// Whether `ref_model` was present in the blob (v3+).
     pub has_ref_model: bool,
 
     /// Affine linearizer G, row-major [motor][signed-square motor]:
     /// u_aff = G · ω|ω|.  Constant over the grid.
-    pub affine: [f32; AFFINE_FLOATS],
+    pub affine: [VoltPerRpsSq; AFFINE_FLOATS],
 
-    /// Steady-state motor drag, V = k_ω·ω + k_ω²·ω|ω| (main.R's motor fit
-    /// without the k_α·ω̇ term): [k_ω (V per model rps), k_ω² (V per
-    /// model rps²)].  Zero when the blob has none (v1–v3).
-    pub motor_drag: [f32; MOTOR_FLOATS],
+    /// Steady-state motor drag.  Zero when the blob has none (v1–v3).
+    pub motor_drag: MotorDrag,
 
     /// Per-motor hover speed ratio for a torque-free hover, geometric mean 1
     /// (1/√(d_fb·d_lr) from the arm lengths).  Uniform before v6.
     pub thrust_balance: [f32; BALANCE_FLOATS],
 
     /// Airframe drag model, see [`DRAG_FLOATS`].  Zero (off) before v7.
-    pub airframe_drag: [f32; DRAG_FLOATS],
+    pub airframe_drag: AirframeDrag,
 
     /// Setpoint target limits, see [`TARGET_FLOATS`].  Zero (defaults)
     /// before v7.
-    pub target_limits: [f32; TARGET_FLOATS],
+    pub target_limits: TargetLimits,
 
     /// Hover motor speed (model rps), see [`HOVER_FLOATS`].  0 before v7.
-    pub hover_rps: f32,
-    /// Per-motor integral voltage bound (V), see [`HOVER_FLOATS`].  0 before v7.
-    pub integral_limit_v: f32,
+    pub hover_rps: RotPerSec,
+    /// Per-motor integral voltage bound, see [`HOVER_FLOATS`].  0 before v7.
+    pub integral_limit_v: Volt,
 }
 
 impl GainStorage {
@@ -320,11 +413,11 @@ impl GainStorage {
         Self {
             header: GainHeader {
                 resolution: 0,
-                min_rps: 0.0,
-                max_rps: 0.0,
-                dt: 0.0,
-                integral_tau: 0.0,
-                derivative_tau: 0.0,
+                min_rps: RotPerSec::new(0.0),
+                max_rps: RotPerSec::new(0.0),
+                dt: Seconds::new(0.0),
+                integral_tau: Seconds::new(0.0),
+                derivative_tau: Seconds::new(0.0),
                 ff_horizon: 0,
             },
             loaded: false,
@@ -334,33 +427,50 @@ impl GainStorage {
             binv: GainTable::EMPTY,
             ref_model: GainTable::EMPTY,
             has_ref_model: false,
-            affine: [0.0; AFFINE_FLOATS],
-            motor_drag: [0.0; MOTOR_FLOATS],
+            affine: [VoltPerRpsSq::new(0.0); AFFINE_FLOATS],
+            motor_drag: MotorDrag::ZERO,
             thrust_balance: [1.0; BALANCE_FLOATS],
-            airframe_drag: [0.0; DRAG_FLOATS],
-            target_limits: [0.0; TARGET_FLOATS],
-            hover_rps: 0.0,
-            integral_limit_v: 0.0,
+            airframe_drag: AirframeDrag::OFF,
+            target_limits: TargetLimits::DEFAULT,
+            hover_rps: RotPerSec::new(0.0),
+            integral_limit_v: Volt::new(0.0),
         }
+    }
+
+    /// The affine linearizer G as a matrix.
+    pub fn affine_matrix(&self) -> AffineMatrix {
+        UniformUnitMatrix::<_, SMatrix<f32, 4, 4>>::from_fn(|i, j| self.affine[4 * i + j])
+            .gauge::<MotorAxes, MotorSpeedSqAxes>()
     }
 }
 
-/// View `count` f32s starting at byte `offset` of an aligned blob.
-fn f32_slice(data: &'static [u8], offset: usize, count: usize) -> &'static [f32] {
-    let bytes = &data[offset..offset + count * 4];
-    debug_assert!(bytes.as_ptr() as usize % core::mem::align_of::<f32>() == 0);
-    // SAFETY: `bytes` is in bounds, 4-byte aligned (blob alignment is checked
-    // in `load_gains` and every table offset is a multiple of 4), and every
-    // bit pattern is a valid f32.
-    unsafe { core::slice::from_raw_parts(bytes.as_ptr() as *const f32, count) }
+/// Sequential typed reader over an aligned blob.  Tables are viewed in
+/// place: blob alignment is checked in `load_gains` and every section
+/// offset is a multiple of 4.
+struct Cursor {
+    data: &'static [u8],
+    offset: usize,
 }
 
-/// View `count` u16s starting at byte `offset` of an aligned blob.
-fn u16_slice(data: &'static [u8], offset: usize, count: usize) -> &'static [u16] {
-    let bytes = &data[offset..offset + count * 2];
-    debug_assert!(bytes.as_ptr() as usize % core::mem::align_of::<u16>() == 0);
-    // SAFETY: as for `f32_slice`; every offset is even.
-    unsafe { core::slice::from_raw_parts(bytes.as_ptr() as *const u16, count) }
+impl Cursor {
+    fn take<E: bytemuck::Pod>(&mut self, count: usize) -> &'static [E] {
+        let bytes = &self.data[self.offset..self.offset + count * core::mem::size_of::<E>()];
+        self.offset += bytes.len();
+        debug_assert!(bytes.as_ptr() as usize % core::mem::align_of::<E>() == 0);
+        // SAFETY: `bytes` is in bounds and aligned (see the struct docs), and
+        // `E: Pod` accepts any bit pattern.  Not `bytemuck::cast_slice`: its
+        // formatting panic path pulls unwinding symbols into the SITL link.
+        unsafe { core::slice::from_raw_parts(bytes.as_ptr().cast::<E>(), count) }
+    }
+
+    fn one<E: bytemuck::Pod>(&mut self) -> E {
+        self.take::<E>(1)[0]
+    }
+
+    /// A quantized table's per-slot (lo, step).
+    fn quant<E: bytemuck::Pod>(&mut self, width: usize) -> (&'static [E], &'static [E]) {
+        (self.take(width), self.take(width))
+    }
 }
 
 /// Read a little-endian `u32` from a byte slice at the given offset.
@@ -378,14 +488,9 @@ fn read_u16(data: &[u8], offset: usize) -> u16 {
     u16::from_le_bytes([data[offset], data[offset + 1]])
 }
 
-/// Read a little-endian `f32` from a byte slice at the given offset.
-fn read_f32(data: &[u8], offset: usize) -> f32 {
-    f32::from_le_bytes([
-        data[offset],
-        data[offset + 1],
-        data[offset + 2],
-        data[offset + 3],
-    ])
+/// Read a value stored as a little-endian `f32` at the given offset.
+fn read_f32<E: bytemuck::Pod>(data: &[u8], offset: usize) -> E {
+    bytemuck::pod_read_unaligned(&data[offset..offset + 4])
 }
 
 /// Simple CRC32 (ISO 3309 / ITU-T V.42 polynomial).
@@ -484,65 +589,65 @@ pub fn load_gains(data: &'static [u8], storage: &mut GainStorage) -> GainLoadRes
     };
 
     // Point at the tables in place
-    let mut offset = HEADER_SIZE;
-    let mut next_f32 = |count: usize| {
-        let table = f32_slice(data, offset, count);
-        offset += count * 4;
-        table
-    };
-    let widths = [GAIN_SLOTS, GAIN_SLOTS, GAIN_SLOTS, GAIN_SLOTS, REF_FLOATS];
-    let counts = [floats_per_table, floats_per_table, floats_per_table, floats_per_table, ref_count];
-    let mut tables = [GainTable::EMPTY; 5];
-
+    let mut cur = Cursor { data, offset: HEADER_SIZE };
     if quantized {
-        let mut quant = [(&[][..], &[][..]); 5];
-        for (q, &w) in quant.iter_mut().zip(&widths) {
-            *q = (next_f32(w), next_f32(w));
-        }
-        storage.affine.copy_from_slice(next_f32(AFFINE_FLOATS));
-        storage.motor_drag.copy_from_slice(next_f32(MOTOR_FLOATS));
+        let ki_q = cur.quant(GAIN_SLOTS);
+        let kd_q = cur.quant(GAIN_SLOTS);
+        let kp_q = cur.quant(GAIN_SLOTS);
+        let binv_q = cur.quant(GAIN_SLOTS);
+        let ref_q = cur.quant(REF_FLOATS);
+        storage.affine.copy_from_slice(cur.take(AFFINE_FLOATS));
+        storage.motor_drag = MotorDrag { k_w: cur.one(), k_w2: cur.one() };
         storage.thrust_balance = [1.0; BALANCE_FLOATS];
         if has_balance {
-            storage.thrust_balance.copy_from_slice(next_f32(BALANCE_FLOATS));
+            storage.thrust_balance.copy_from_slice(cur.take(BALANCE_FLOATS));
         }
-        storage.airframe_drag = [0.0; DRAG_FLOATS];
-        storage.target_limits = [0.0; TARGET_FLOATS];
-        storage.hover_rps = 0.0;
-        storage.integral_limit_v = 0.0;
+        storage.airframe_drag = AirframeDrag::OFF;
+        storage.target_limits = TargetLimits::DEFAULT;
+        storage.hover_rps = RotPerSec::new(0.0);
+        storage.integral_limit_v = Volt::new(0.0);
         if has_drag {
-            storage.airframe_drag.copy_from_slice(next_f32(DRAG_FLOATS));
-            storage.target_limits.copy_from_slice(next_f32(TARGET_FLOATS));
-            [storage.hover_rps, storage.integral_limit_v] = next_f32(HOVER_FLOATS).try_into().unwrap();
+            storage.airframe_drag = AirframeDrag {
+                lp: cur.one(),
+                roll: [cur.one(), cur.one()],
+                pitch: [cur.one(), cur.one()],
+            };
+            storage.target_limits = TargetLimits { slew: cur.one(), jerk: cur.one() };
+            storage.hover_rps = cur.one();
+            storage.integral_limit_v = cur.one();
         }
-        for ((table, &(lo, step)), &count) in tables.iter_mut().zip(&quant).zip(&counts) {
-            *table = GainTable { data: TableData::U16 { q: u16_slice(data, offset, count), lo, step } };
-            offset += count * 2;
+        fn table<E: TableEntry>(cur: &mut Cursor, (lo, step): (&'static [E], &'static [E]), count: usize) -> GainTable<E> {
+            GainTable { data: TableData::U16 { q: cur.take(count), lo, step } }
         }
+        storage.ki = table(&mut cur, ki_q, floats_per_table);
+        storage.kd = table(&mut cur, kd_q, floats_per_table);
+        storage.kp = table(&mut cur, kp_q, floats_per_table);
+        storage.binv = table(&mut cur, binv_q, floats_per_table);
+        storage.ref_model = table(&mut cur, ref_q, ref_count);
     } else {
-        for (table, &count) in tables.iter_mut().zip(&counts) {
-            *table = GainTable { data: TableData::F32(next_f32(count)) };
+        fn table<E: TableEntry>(cur: &mut Cursor, count: usize) -> GainTable<E> {
+            GainTable { data: TableData::F32(cur.take(count)) }
         }
-        storage.affine = [0.0; AFFINE_FLOATS];
+        storage.ki = table(&mut cur, floats_per_table);
+        storage.kd = table(&mut cur, floats_per_table);
+        storage.kp = table(&mut cur, floats_per_table);
+        storage.binv = table(&mut cur, floats_per_table);
+        storage.ref_model = table(&mut cur, ref_count);
+        storage.affine = [VoltPerRpsSq::new(0.0); AFFINE_FLOATS];
         if has_affine {
-            storage.affine.copy_from_slice(next_f32(AFFINE_FLOATS));
+            storage.affine.copy_from_slice(cur.take(AFFINE_FLOATS));
         }
-        storage.motor_drag = [0.0; MOTOR_FLOATS];
+        storage.motor_drag = MotorDrag::ZERO;
         if has_motor {
-            storage.motor_drag.copy_from_slice(next_f32(MOTOR_FLOATS));
+            storage.motor_drag = MotorDrag { k_w: cur.one(), k_w2: cur.one() };
         }
         storage.thrust_balance = [1.0; BALANCE_FLOATS];
-        storage.airframe_drag = [0.0; DRAG_FLOATS];
-        storage.target_limits = [0.0; TARGET_FLOATS];
-        storage.hover_rps = 0.0;
-        storage.integral_limit_v = 0.0;
+        storage.airframe_drag = AirframeDrag::OFF;
+        storage.target_limits = TargetLimits::DEFAULT;
+        storage.hover_rps = RotPerSec::new(0.0);
+        storage.integral_limit_v = Volt::new(0.0);
     }
 
-    let [ki, kd, kp, binv, ref_model] = tables;
-    storage.ki = ki;
-    storage.kd = kd;
-    storage.kp = kp;
-    storage.binv = binv;
-    storage.ref_model = ref_model;
     storage.has_ref_model = has_ref_model;
 
     storage.loaded = true;
