@@ -64,6 +64,13 @@
 //#define ENABLE_SIMULATOR_IMU_SYNC 1
 //#define ENABLE_SIMULATOR_GYROPID_SYNC 1
 
+// WhippyFlight's gains are discretised at the PID loop period, so the
+// simulator has to step the plant at that period with exactly one PID loop
+// per step: run in lockstep, one loop per fdm_packet.
+#if defined(USE_WHIPPYFLIGHT) && !defined(ENABLE_SIMULATOR_GYROPID_SYNC)
+#define ENABLE_SIMULATOR_GYROPID_SYNC 1
+#endif
+
 // file name to save config
 #define EEPROM_FILENAME "eeprom.bin"
 #define CONFIG_IN_FILE
@@ -175,6 +182,21 @@
 
 #define TARGET_FLASH_SIZE 2048
 
+#ifdef USE_WHIPPYFLIGHT
+// Gain storage emulation: file-backed dataflash (dataflash.bin) holding the
+// gain partition, and a file-backed SD card (sdcard.img) for WHIPPY.WFG.
+// The gain store keeps the hardware default size so oversized blobs fail
+// here too.
+#define USE_FLASH_CHIP
+#define USE_FLASH_SITL
+#define USE_SDCARD
+#define USE_SDCARD_SITL
+// Gain blobs are discretised for the PID loop rate and arming is refused on
+// a mismatch; run the virtual gyro (and PID loop) at the 4 kHz the blobs
+// target on hardware.
+#define VIRTUAL_GYRO_SAMPLE_RATE_HZ 4000
+#endif
+
 #define DEFIO_NO_PORTS   // suppress 'no pins defined' warning
 
 #define FLASH_PAGE_SIZE (0x400)
@@ -251,10 +273,30 @@ typedef struct {
     float motor_speed[4];   // normal: [0.0, 1.0], 3D: [-1.0, 1.0]
 } servo_packet;
 
+// Lockstep (WhippyFlight) builds answer each fdm_packet with this: the
+// servo_packet plus that PID loop's debug[] values, so a simulator can
+// trace them per loop.
+typedef struct {
+    servo_packet servo;
+    int16_t debug[8];       // build/debug.h debug[]
+} servo_packet_debug;
+
 typedef struct {
     uint16_t motorCount; // Count of motor in the PWM output.
     float pwm_output_raw[SIMULATOR_MAX_PWM_CHANNELS];   // Raw PWM from 1100 to 1900
 } servo_packet_raw;
+
+// An fdm_packet may be followed by ESC telemetry, for simulators that model
+// the motors and battery; plain fdm_packets leave it unavailable.
+typedef struct {
+    fdm_packet fdm;
+    double motor_erpm[4];               // electrical RPM, by motor index
+    double battery_voltage;             // V
+} fdm_packet_esc;
+
+bool sitlHasEscTelemetry(void);
+float sitlGetMotorErpm(int motorIndex);
+float sitlGetBatteryVoltage(void);
 
 uint64_t nanos64_real(void);
 uint64_t micros64_real(void);

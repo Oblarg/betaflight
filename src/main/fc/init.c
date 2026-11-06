@@ -107,6 +107,9 @@
 #include "flight/pid.h"
 #include "flight/pid_init.h"
 #include "flight/position.h"
+#ifdef USE_WHIPPYFLIGHT
+#include "flight/whippyflight_glue.h"
+#endif
 #include "flight/pos_hold.h"
 #include "flight/servos.h"
 
@@ -855,6 +858,12 @@ void initPhase3(void)
             initFlags |= SD_INIT_ATTEMPTED;
         }
     }
+#endif
+
+#ifdef USE_WHIPPYFLIGHT
+    // Reads the SD card and the dataflash partition table, so it must follow
+    // both inits.  On failure arming stays blocked (ARMING_DISABLED_WHIPPYFLIGHT).
+    whippyflightLoadGains();
 #endif
 #ifdef USE_BLACKBOX
     blackboxInit();

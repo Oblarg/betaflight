@@ -42,6 +42,10 @@ typedef struct {
     uint8_t id;
 } tcpPort_t;
 
+// dyad is not thread-safe: dyad_update() frees streams in the CLOSED state, which is
+// the state dyad_newStream() returns, so stream setup must hold this lock too.
+extern pthread_mutex_t dyadStreamLock;
+
 serialPort_t *serTcpOpen(serialPortIdentifier_e id, serialReceiveCallbackPtr rxCallback, void *rxCallbackData, uint32_t baudRate, portMode_e mode, portOptions_e options);
 
 // tcpPort API

@@ -8,7 +8,13 @@ TARGET_SRC = \
             drivers/compass/compass_virtual.c \
             drivers/serial_tcp.c \
             io/gps_virtual.c \
-            blackbox/blackbox_virtual.c
+            blackbox/blackbox_virtual.c \
+            drivers/flash/flash.c \
+            drivers/flash/flash_sitl.c \
+            drivers/sdcard.c \
+            drivers/sdcard_sitl.c \
+            io/asyncfatfs/asyncfatfs.c \
+            io/asyncfatfs/fat_standard.c
 
 SIZE_OPTIMISED_SRC += \
             drivers/serial_tcp.c

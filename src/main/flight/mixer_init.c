@@ -543,3 +543,8 @@ float getMotorOutputHigh(void)
 {
     return mixerRuntime.motorOutputHigh;
 }
+
+float getMotorDisarmOutput(void)
+{
+    return mixerRuntime.disarmMotorOutput;
+}

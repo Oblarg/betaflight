@@ -543,6 +543,14 @@ static void applyMotorStop(void)
 #endif // USE_WING
 }
 
+#ifdef USE_WHIPPYFLIGHT
+bool mixerApplyCrashFlipIfActive(timeUs_t currentTimeUs)
+{
+    calculateThrottleAndCurrentMotorEndpoints(currentTimeUs);
+    return applyCrashFlipModeToMotors();
+}
+#endif // USE_WHIPPYFLIGHT
+
 #ifdef USE_DYN_LPF
 static void updateDynLpfCutoffs(timeUs_t currentTimeUs, float throttle)
 {

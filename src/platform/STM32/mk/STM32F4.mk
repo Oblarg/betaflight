@@ -154,6 +154,13 @@ endif
 #Flags
 ARCH_FLAGS      = -mthumb -mcpu=cortex-m4 -march=armv7e-m -mfloat-abi=hard -mfpu=fpv4-sp-d16
 
+# WhippyFlight: link the Rust LQR controller staticlib.
+ifneq ($(filter USE_WHIPPYFLIGHT,$(OPTIONS)),)
+WHIPPYFLIGHT_TARGET  ?= thumbv7em-none-eabihf
+WHIPPYFLIGHT_LIB_DIR ?= $(ROOT)/src/main/flight/whippyflight/target/$(WHIPPYFLIGHT_TARGET)/release
+EXTRA_LD_FLAGS       += -L$(WHIPPYFLIGHT_LIB_DIR) -lwhippyflight_control
+endif
+
 ifeq ($(TARGET_MCU),STM32F411xE)
 DEVICE_FLAGS    += -DSTM32F411xE -finline-limit=20
 LD_SCRIPT       = $(LINKER_DIR)/stm32_flash_f411.ld

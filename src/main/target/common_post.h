@@ -564,6 +564,19 @@
 #undef USE_FLASHFS
 #endif
 
+#if defined(USE_WHIPPYFLIGHT) && !defined(WHIPPYFLIGHT_GAIN_STORE_SIZE)
+// Largest gain blob the target accepts: both the dataflash partition it is
+// stored in and the RAM buffer it is copied to at boot.  20 KiB holds a
+// 3-point grid (v5, ~16.8 KiB) and fits F411 RAM alongside SD support;
+// 4 points needs ~51 KiB and 5 points ~123 KiB.
+#define WHIPPYFLIGHT_GAIN_STORE_SIZE (20 * 1024)
+#endif
+
+#if defined(USE_WHIPPYFLIGHT) && !defined(WHIPPYFLIGHT_GAIN_FILENAME)
+// Gain blob on the SD card, in its root directory (8.3 name).
+#define WHIPPYFLIGHT_GAIN_FILENAME "WHIPPY.WFG"
+#endif
+
 #if (!defined(USE_SDCARD) && !defined(USE_FLASHFS)) || !defined(USE_BLACKBOX)
 #undef USE_USB_MSC
 #endif

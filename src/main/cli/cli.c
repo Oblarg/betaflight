@@ -114,6 +114,9 @@ bool cliMode = false;
 #include "flight/pid.h"
 #include "flight/position.h"
 #include "flight/servos.h"
+#ifdef USE_WHIPPYFLIGHT
+#include "flight/whippyflight_glue.h"
+#endif
 
 #include "io/asyncfatfs/asyncfatfs.h"
 #include "io/beeper.h"
@@ -6493,6 +6496,12 @@ RAM_CODE static void cliStatus(const char *cmdName, char *cmdline)
         cliPrintf(" %s", getArmingDisableFlagName(flag));
     }
     cliPrintLinefeed();
+#ifdef USE_WHIPPYFLIGHT
+    const char *wfBlockReason = whippyflightArmingBlockReason();
+    if (wfBlockReason) {
+        cliPrintLinef("WHIPPYFLIGHT: %s", wfBlockReason);
+    }
+#endif
 
 #ifdef USE_DSHOT_BITBANG
     static const char * const dshotBitbangStatusNames[] = { "OK", "MOTOR_PIN_CONFLICT", "NO_PACER", "TOO_MANY_PORTS" };

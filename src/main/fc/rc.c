@@ -125,6 +125,25 @@ float getSetpointRate(int axis)
 #endif
 }
 
+// Unsmoothed setpoint, updated once per RX frame.
+float getRawSetpoint(int axis)
+{
+    return rawSetpoint[axis];
+}
+
+static uint32_t rcFrameCount;    // increments when rawSetpoint takes a new frame
+static timeUs_t rcFrameTimeUs;   // arrival time of the latest frame
+
+uint32_t getRcFrameCount(void)
+{
+    return rcFrameCount;
+}
+
+timeUs_t getRcFrameTimeUs(void)
+{
+    return rcFrameTimeUs;
+}
+
 static float maxRcRate[3];
 float getMaxRcRate(int axis)
 {
@@ -294,6 +313,7 @@ void updateRcRefreshRate(timeUs_t currentTimeUs, bool rxReceivingSignal)
             delta = cmpTimeUs(rxTime, lastRxTimeUs);
         }
         lastRxTimeUs = rxTime;
+        rcFrameTimeUs = rxTime;
         DEBUG_SET(DEBUG_RX_TIMING, 1, rxTime / 100);  //!< Frame Timestamp [unit:0.1ms]
     } else {
         if (lastRxTimeUs) {
@@ -672,6 +692,7 @@ FAST_CODE void processRcCommand(void)
         if (rxConfig()->fpvCamAngleDegrees && IS_RC_MODE_ACTIVE(BOXFPVANGLEMIX) && !FLIGHT_MODE(HEADFREE_MODE)) {
             scaleRawSetpointToFpvCamAngle();
         }
+        rcFrameCount++;
     }
 
 #ifdef USE_RC_SMOOTHING_FILTER

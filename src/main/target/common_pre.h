@@ -437,6 +437,11 @@
 #define USE_CUSTOM_BOX_NAMES
 #define USE_BATTERY_VOLTAGE_SAG_COMPENSATION
 #define USE_SIMPLIFIED_TUNING
+
+// WhippyFlight: LQR controller replacing BF's PID + mixer.
+// NOT enabled by default — enable via OPTIONS="USE_WHIPPYFLIGHT" or
+// in a board config.h.  Requires linking the Rust staticlib.
+// #define USE_WHIPPYFLIGHT
 #define USE_CRAFTNAME_MSGS
 
 #if !defined(CORE_BUILD)

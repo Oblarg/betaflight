@@ -187,6 +187,7 @@ COMMON_SRC = \
             flight/nav_trail.c \
             flight/pid.c \
             flight/pid_init.c \
+            flight/whippyflight_glue.c \
             flight/position.c \
             flight/position_estimator.c \
             flight/position_filter.c \

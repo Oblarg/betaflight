@@ -1,0 +1,121 @@
+{
+  "yaw": {
+    "yawRate": -0.5718770968820077,
+    "propVelSumSq": 6.929846837529852e-05,
+    "propAccelSum": 0.0020843057996728664
+  },
+  "pitch": {
+    "pitchRate": -0.7155124489439879,
+    "propVelSumSq": 0.0006728978111535552,
+    "dFront": 1.0,
+    "dBack": 1.2431882839070314
+  },
+  "roll": {
+    "rollRate": -1.0503624247727288,
+    "propVelSumSq": 0.0009061406012670474,
+    "dLeft": 1.0611796649949892,
+    "dRight": 1.0
+  },
+  "motors": {
+    "motorVel": 0.044451149424854244,
+    "motorVelSq": 4.804569191389195e-05,
+    "motorAccel": 0.0013619116897268945
+  },
+  "drag": {
+    "axes": [],
+    "lp_hz": 5.0
+  },
+  "fit": {
+    "sources": [
+      "01-05-2025/LOG00047.BFL#1",
+      "01-05-2025/LOG00048.BFL#1",
+      "01-05-2025/LOG00052.BFL#1"
+    ],
+    "volts": "r",
+    "select": "robust",
+    "arms": {
+      "pitch": {
+        "ratio": 1.2431882839070314,
+        "se": 0.00370015792927211,
+        "source": "fit",
+        "r2_profile": {
+          "0.8x": 0.90278,
+          "0.9x": 0.9193,
+          "1x": 0.92428,
+          "1.1x": 0.9201,
+          "1.25x": 0.90163
+        }
+      },
+      "roll": {
+        "ratio": 1.0611796649949892,
+        "se": 0.0021796662827630645,
+        "source": "fit",
+        "r2_profile": {
+          "0.8x": 0.88986,
+          "0.9x": 0.91818,
+          "1x": 0.92668,
+          "1.1x": 0.91974,
+          "1.25x": 0.89024
+        }
+      }
+    },
+    "yaw": {
+      "r2": 0.9149,
+      "rows": 131835,
+      "rel_se": {
+        "yawRate": 0.01005,
+        "propVelSumSq": 0.0019,
+        "propAccelSum": 0.00102
+      }
+    },
+    "pitch": {
+      "r2": 0.9243,
+      "rows": 18678,
+      "rel_se": {
+        "pitchRate": 0.02824,
+        "propVelSumSq": 0.00209
+      }
+    },
+    "roll": {
+      "r2": 0.9267,
+      "rows": 22509,
+      "rel_se": {
+        "rollRate": 0.01682,
+        "propVelSumSq": 0.00187
+      }
+    },
+    "motors": {
+      "r2": 0.9619,
+      "rows": 3881556,
+      "rel_se": {
+        "motorVel": 0.00016,
+        "motorVelSq": 0.0009,
+        "motorAccel": 0.00037
+      }
+    }
+  },
+  "airframe": {
+    "vbat_v": 22.49,
+    "hover_rps": 130.9,
+    "cells": 6,
+    "craft": "PurpHaz",
+    "board": "SPBE SPEEDYBEEF405V4",
+    "firmware": "Betaflight 4.5.1 (77d01ba3b) STM32F405",
+    "motor_poles": 14,
+    "loop_hz": 4000.0,
+    "vbatcellvoltage": [
+      330,
+      350,
+      430
+    ],
+    "gyro_lpf": [
+      {
+        "type": "PT1",
+        "hz": 1000
+      }
+    ],
+    "mixer": "QUADX",
+    "yaw_motors_reversed": true,
+    "dump": "BTFL_cli_GOLDEXP_20250202_152917_SPEEDYBEEF405V4.txt"
+  }
+}

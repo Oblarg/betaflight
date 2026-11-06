@@ -14,17 +14,19 @@
 //! the discrete-time algebraic Riccati equation at a grid of operating points)
 //! that are uploaded to onboard flash and loaded at boot.
 
-#![no_std]
+#![cfg_attr(not(feature = "std"), no_std)]
 
-mod controller;
+pub mod allocation;
+pub mod controller;
 mod ffi;
-mod gains;
-mod interpolation;
-mod types;
+pub mod gains;
+pub mod interpolation;
+pub mod setpoint;
+pub mod types;
 
 // Panic handler for embedded — required by no_std staticlib builds.
 // In release builds panics are compiled out (panic = "abort" + LTO).
-#[cfg(not(test))]
+#[cfg(not(feature = "std"))]
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
     loop {}

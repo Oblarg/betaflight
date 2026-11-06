@@ -1,0 +1,21 @@
+{
+  "meteor65_4k": {
+    "description": "BetaFPV Meteor65 Pro (1S), flown at a 4 kHz loop: the crate's test blob, which the Rust tests embed and SITL flies",
+    "fit": "meteor65.json",
+    "noise": "meteor65_noise.bin",
+    "gen_args": ["--dt", "0.00025"],
+    "blob": "../test_gains.wfg"
+  },
+  "meteor65": {
+    "description": "BetaFPV Meteor65 Pro (1S) at its logged 3.2 kHz loop",
+    "fit": "meteor65.json",
+    "noise": "meteor65_noise.bin",
+    "gen_args": []
+  },
+  "purplehaze": {
+    "description": "Purple Haze (6S, 4 kHz)",
+    "fit": "purplehaze.json",
+    "noise": "purplehaze_noise.bin",
+    "gen_args": []
+  }
+}

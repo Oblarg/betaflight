@@ -149,6 +149,13 @@ bool isFixedWing(void);
 
 float getMotorOutputLow(void);
 float getMotorOutputHigh(void);
+float getMotorDisarmOutput(void);
+
+#ifdef USE_WHIPPYFLIGHT
+// Set up motor output endpoints and apply crashflip if active.
+// Returns true if crashflip handled motor[], false otherwise.
+bool mixerApplyCrashFlipIfActive(timeUs_t currentTimeUs);
+#endif
 
 #ifdef USE_WING
 float getMotorOutputRms(void);

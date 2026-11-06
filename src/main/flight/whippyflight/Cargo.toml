@@ -8,18 +8,29 @@ description = "LQR flight control stack for Betaflight, powered by whippyunits +
 
 [lib]
 name = "whippyflight_control"
-crate-type = ["staticlib"]
+crate-type = ["staticlib", "lib"]
 
 [dependencies]
 # Unit-safe quantities — no_std, no alloc
-whippyunits = { git = "https://github.com/WhippyUnits/whippyunits-rs.git", default-features = false }
+# NOTE: path deps point at the local whippyunits checkout for development.
+# Switch back to git deps for release/CI.
+whippyunits = { path = "../../../../../whippyunits", default-features = false }
 # Unit-safe linear algebra over nalgebra — no_std, no alloc
-whippyalgebra = { git = "https://github.com/WhippyUnits/whippyunits-rs.git", default-features = false, features = ["nalgebra"] }
+whippyalgebra = { path = "../../../../../whippyunits/whippyalgebra", default-features = false, features = ["nalgebra"] }
+
+[dev-dependencies]
+# Eval plant reads gen_wfg's coefficient JSON.
+serde_json = "1"
 
 [features]
 default = []
-# Enable std for host-side testing (cargo test on x86)
-std = ["whippyunits/std", "whippyalgebra/std"]
+# Enable std for host-side testing (cargo test on x86); host builds always
+# carry the airframe drag mode so the tests and evals exercise it.
+std = ["whippyunits/std", "whippyalgebra/std", "airframe-drag"]
+# Compensate the rotor-drag torque of tall frames from the accelerometer
+# when the blob has a drag block (v7).  Off by default: small frames don't
+# need it, and without it the block is parsed but ignored.
+airframe-drag = []
 
 [profile.release]
 opt-level = "s"    # optimize for size on embedded
@@ -27,5 +38,5 @@ lto = true
 codegen-units = 1
 panic = "abort"
 
-[profile.dev]
-panic = "abort"
+# panic = "abort" for dev is set via .cargo/config.toml for embedded builds;
+# omitted here so `cargo test` on host can use the default unwinding harness.

@@ -86,12 +86,14 @@ static void sdcardInsertionDetectInit(const sdcardConfig_t *config)
 bool sdcard_isInserted(void)
 {
     bool result = true;
+#ifndef USE_SDCARD_SITL
     if (sdcard.cardDetectPin) {
         result = IORead(sdcard.cardDetectPin) != 0;
         if (sdcard.detectionInverted) {
             result = !result;
         }
     }
+#endif
     return result;
 }
 
@@ -112,6 +114,15 @@ void sdcard_preinit(const sdcardConfig_t *config)
 void sdcard_init(const sdcardConfig_t *config)
 {
     sdcardInsertionDetectInit(config);
+
+#ifdef USE_SDCARD_SITL
+    // The file-backed card stands in for whichever mode is configured.
+    if (config->mode != SDCARD_MODE_NONE) {
+        sdcardVTable = &sdcardSitlVTable;
+        sdcardVTable->sdcard_init(config, NULL);
+    }
+    return;
+#endif
 
     switch (config->mode) {
 #ifdef USE_SDCARD_SPI

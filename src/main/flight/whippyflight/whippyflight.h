@@ -21,11 +21,6 @@ typedef struct {
 } WhippyflightSensorData;
 
 typedef struct {
-    float rate_rps[3];      // [yaw, pitch, roll] desired rates in rotations/s
-    float throttle;         // [0, 1]
-} WhippyflightSetpointData;
-
-typedef struct {
     float motor_duty[4];    // [fl, bl, fr, br] duty cycle [0, 1]
 } WhippyflightControlOutput;
 
@@ -59,11 +54,23 @@ WhippyflightGainLoadResult whippyflight_init(
 );
 
 /**
- * Run one control iteration.  Call from the PID loop.
+ * Feed one RX frame to the setpoint estimator: raw rate setpoint in rot/s,
+ * arrival time (µs), and the current RX period (s).
+ */
+void whippyflight_setpoint_packet(
+    const float rate_rps[3],
+    uint32_t time_us,
+    float rx_period_s
+);
+
+/**
+ * Run one control iteration.  Call from the PID loop; now_us shares the
+ * packet timestamps' clock.
  */
 WhippyflightControlOutput whippyflight_update(
     const WhippyflightSensorData *sensors,
-    const WhippyflightSetpointData *setpoint
+    float throttle,
+    uint32_t now_us
 );
 
 /**

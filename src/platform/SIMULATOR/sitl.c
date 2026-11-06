@@ -26,6 +26,7 @@
 #include <string.h>
 
 #include <errno.h>
+#include <sched.h>
 #include <time.h>
 
 #include "common/maths.h"
@@ -101,7 +102,46 @@ static bool fdm_received = false;
 
 static struct timespec start_time;
 static double simRate = 1.0;
-static pthread_t tcpWorker, udpWorker, udpWorkerRC;
+
+#if ENABLE_SIMULATOR_GYROPID_SYNC
+// Lockstep clock.  Scaling real time by the measured packet rate (simRate)
+// holds whatever rate the link settles at, because the gyro task's deadline
+// in that clock is what paces the replies.  Instead the clock only moves
+// for a packet, by at most one packet step from where the last PID loop
+// left it, and it stops when the PID loop takes the packet (lockMainPID).
+// It jumps to SIM_CLOCK_TAIL_NS short of the step, then runs the rest at
+// SIM_CLOCK_RATE × real time, so the PID deadline is caught within a few µs
+// (the jump alone would rest wherever the first deadline fell).  So each
+// packet passes one PID deadline, promptly; the clock rests just past it,
+// leaving the scheduler a whole period for the other tasks, with timing
+// that repeats run to run.  The main thread makes the jump between
+// scheduler() calls (simClockApplyPacket), so no task straddles it: the
+// scheduler times tasks by this clock and would stop fitting one it saw
+// take a whole step in.  Before the first packet, and once none has come
+// for SIM_CLOCK_STALL_NS, it runs at real time (boot, CLI, delay()).
+#define SIM_CLOCK_TAIL_NS 25000ULL
+#define SIM_CLOCK_RATE 2
+#define SIM_CLOCK_STALL_NS 500000000ULL
+// The scheduler spins on the clock, so readers take no lock (a seqlock);
+// the two writers, the UDP and main threads, share simClockWriteLock.
+static pthread_mutex_t simClockWriteLock = PTHREAD_MUTEX_INITIALIZER;
+static uint32_t simClockSeq;     // odd while being written
+static uint64_t simClockBaseNs;  // simulated time at simClockRealNs
+static uint64_t simClockCapNs = UINT64_MAX;  // where the advance stops
+static uint64_t simClockRealNs;  // real time of the last write
+static uint32_t simClockRate = 1;  // advance per real ns
+// Packet step waiting for the main thread, ns + 1 (0: none).
+static uint64_t simClockPendingStep;
+// Lockstep counters for the periodic status line: packets applied to the
+// clock, PID loops that took a packet, ones that found none, replies sent.
+static uint32_t simStatApplied, simStatTaken, simStatNotTaken, simStatSent;
+
+static void simClockPacket(double stepS);
+#else
+static pthread_t udpWorkerRC;
+#endif
+static void receiveRc(uint32_t timeout_ms);
+static pthread_t tcpWorker, udpWorker;
 static bool workerRunning = true;
 static udpLink_t stateLink, pwmLink, pwmRawLink, rcLink;
 static pthread_mutex_t updateLock;
@@ -258,9 +298,22 @@ const char *targetGetConfigFile(void)
 
 int timeval_sub(struct timespec *result, struct timespec *x, struct timespec *y);
 
+#if ENABLE_SIMULATOR_GYROPID_SYNC
+static void simClockStop(void);
+#endif
+
 int lockMainPID(void)
 {
-    return pthread_mutex_trylock(&mainLoopLock);
+    const int ret = pthread_mutex_trylock(&mainLoopLock);
+#if ENABLE_SIMULATOR_GYROPID_SYNC
+    if (ret == 0) {
+        simClockStop();
+        __atomic_add_fetch(&simStatTaken, 1, __ATOMIC_RELAXED);
+    } else {
+        __atomic_add_fetch(&simStatNotTaken, 1, __ATOMIC_RELAXED);
+    }
+#endif
+    return ret;
 }
 
 #define RAD2DEG (180.0 / M_PI)
@@ -287,6 +340,9 @@ static void updateState(const fdm_packet* pkt)
         last_realtime = realtime_now;
         last_ts.tv_sec  = now_ts.tv_sec;
         last_ts.tv_nsec = now_ts.tv_nsec;
+#if ENABLE_SIMULATOR_GYROPID_SYNC
+        simClockPacket(0.0);
+#endif
         sendMotorUpdate();
         return;
     }
@@ -490,6 +546,10 @@ static void updateState(const fdm_packet* pkt)
     static uint64_t lastDebugTimeUs = 0;
     if (realtime_now - lastDebugTimeUs >= 1000000) {
         lastDebugTimeUs = realtime_now;
+#if ENABLE_SIMULATOR_GYROPID_SYNC
+        printf("[SITL] t=%dms lockstep: applied %u taken %u not-taken %u sent %u\n", (int)millis(),
+            (unsigned)simStatApplied, (unsigned)simStatTaken, (unsigned)simStatNotTaken, (unsigned)simStatSent);
+#endif
 
         const armingDisableFlags_e flags = getArmingDisableFlags();
         if (flags) {
@@ -520,21 +580,72 @@ static void updateState(const fdm_packet* pkt)
 
 #if ENABLE_SIMULATOR_GYROPID_SYNC
     pthread_mutex_unlock(&mainLoopLock); // can run main loop
+    // After the unlock: a PID deadline passed before it would be spent
+    // without a PID loop.
+    simClockPacket((deltaSim > 0 && deltaSim < 0.02) ? deltaSim : 0.0);
 #endif
+}
+
+static pthread_mutex_t escTelemetryLock = PTHREAD_MUTEX_INITIALIZER;
+static bool escTelemetryValid;
+static float escMotorErpm[4];
+static float escBatteryVoltage;
+
+bool sitlHasEscTelemetry(void)
+{
+    return escTelemetryValid;
+}
+
+float sitlGetMotorErpm(int motorIndex)
+{
+    pthread_mutex_lock(&escTelemetryLock);
+    const float erpm = (motorIndex >= 0 && motorIndex < 4) ? escMotorErpm[motorIndex] : 0.0f;
+    pthread_mutex_unlock(&escTelemetryLock);
+    return erpm;
+}
+
+float sitlGetBatteryVoltage(void)
+{
+    pthread_mutex_lock(&escTelemetryLock);
+    const float voltage = escBatteryVoltage;
+    pthread_mutex_unlock(&escTelemetryLock);
+    return voltage;
+}
+
+static void updateEscTelemetry(const fdm_packet_esc *pkt, bool present)
+{
+    pthread_mutex_lock(&escTelemetryLock);
+    if (present) {
+        for (int i = 0; i < 4; i++) {
+            escMotorErpm[i] = pkt->motor_erpm[i];
+        }
+        escBatteryVoltage = pkt->battery_voltage;
+    }
+    escTelemetryValid = present;
+    pthread_mutex_unlock(&escTelemetryLock);
 }
 
 static void* udpThread(void* data)
 {
     UNUSED(data);
     int n = 0;
+    static fdm_packet_esc fdmEscPkt;
 
     while (workerRunning) {
-        n = udpRecv(&stateLink, &fdmPkt, sizeof(fdm_packet), 100);
-        if (n == sizeof(fdm_packet)) {
+        n = udpRecv(&stateLink, &fdmEscPkt, sizeof(fdmEscPkt), 100);
+#if ENABLE_SIMULATOR_GYROPID_SYNC
+        // Lockstep: RC sent ahead of a packet takes effect from that packet's
+        // PID loop on (rxFrameCheck runs right after it), never mid-step.
+        receiveRc(0);
+#endif
+        if (n == sizeof(fdm_packet) || n == sizeof(fdm_packet_esc)) {
+            fdmPkt = fdmEscPkt.fdm;
             if (!fdm_received) {
                 printf("[SITL] new fdm %d t:%f from %s:%d\n", n, fdmPkt.timestamp, inet_ntoa(stateLink.recv.sin_addr), stateLink.recv.sin_port);
                 fdm_received = true;
             }
+            // Before updateState(), which releases the PID loop that reads it.
+            updateEscTelemetry(&fdmEscPkt, n == sizeof(fdm_packet_esc));
             updateState(&fdmPkt);
         }
     }
@@ -543,28 +654,35 @@ static void* udpThread(void* data)
     return NULL;
 }
 
+// Apply any RC packets that arrive within timeout_ms.
+static void receiveRc(uint32_t timeout_ms)
+{
+    while (udpRecv(&rcLink, &rcPkt, sizeof(rc_packet), timeout_ms) == sizeof(rc_packet)) {
+        if (!rc_received) {
+            printf("[SITL] new rc %d: t:%f AETR: %d %d %d %d AUX1-4: %d %d %d %d\n", (int)sizeof(rc_packet), rcPkt.timestamp,
+                rcPkt.channels[0], rcPkt.channels[1],rcPkt.channels[2],rcPkt.channels[3],
+                rcPkt.channels[4], rcPkt.channels[5],rcPkt.channels[6],rcPkt.channels[7]);
+
+            rc_received = true;
+        }
+        rxUpdateUdpChannels(rcPkt.channels, SIMULATOR_MAX_RC_CHANNELS);
+        timeout_ms = 0;
+    }
+}
+
+#if !ENABLE_SIMULATOR_GYROPID_SYNC
 static void *udpRCThread(void *data)
 {
     UNUSED(data);
-    int n = 0;
 
     while (workerRunning) {
-        n = udpRecv(&rcLink, &rcPkt, sizeof(rc_packet), 100);
-        if (n == sizeof(rc_packet)) {
-            if (!rc_received) {
-                printf("[SITL] new rc %d: t:%f AETR: %d %d %d %d AUX1-4: %d %d %d %d\n", n, rcPkt.timestamp,
-                    rcPkt.channels[0], rcPkt.channels[1],rcPkt.channels[2],rcPkt.channels[3],
-                    rcPkt.channels[4], rcPkt.channels[5],rcPkt.channels[6],rcPkt.channels[7]);
-
-                rc_received = true;
-            }
-            rxUpdateUdpChannels(rcPkt.channels, SIMULATOR_MAX_RC_CHANNELS);
-        }
+        receiveRc(100);
     }
 
     printf("udpRCThread end!!\n");
     return NULL;
 }
+#endif
 
 static void* tcpThread(void* data)
 {
@@ -575,7 +693,9 @@ static void* tcpThread(void* data)
     dyad_setUpdateTimeout(0.01f);
 
     while (workerRunning) {
+        pthread_mutex_lock(&dyadStreamLock);
         dyad_update();
+        pthread_mutex_unlock(&dyadStreamLock);
     }
 
     dyad_shutdown();
@@ -630,11 +750,14 @@ void systemInit(void)
         exit(1);
     }
 
+#if !ENABLE_SIMULATOR_GYROPID_SYNC
+    // Lockstep builds take RC on the UDP thread (see udpThread).
     ret = pthread_create(&udpWorkerRC, NULL, udpRCThread, NULL);
     if (ret != 0) {
         printf("Create udpRCThread error!\n");
         exit(1);
     }
+#endif
 }
 
 void systemReset(void)
@@ -696,6 +819,88 @@ uint64_t millis64_real(void)
     return 1.0e3*((ts.tv_sec + (ts.tv_nsec*1.0e-9)) - (start_time.tv_sec + (start_time.tv_nsec*1.0e-9)));
 }
 
+#if ENABLE_SIMULATOR_GYROPID_SYNC
+// The clock at realNs: rate × real time from base, held at cap, and at
+// real time again from cap once stalled.
+static uint64_t simClockAt(uint64_t baseNs, uint64_t capNs, uint64_t syncRealNs, uint32_t rate, uint64_t realNs)
+{
+    const uint64_t elapsed = realNs > syncRealNs ? realNs - syncRealNs : 0;
+    uint64_t now = baseNs + rate * elapsed;
+    if (now > capNs) {
+        now = capNs;
+    }
+    if (capNs != UINT64_MAX && elapsed > SIM_CLOCK_STALL_NS && now < capNs + (elapsed - SIM_CLOCK_STALL_NS)) {
+        now = capNs + (elapsed - SIM_CLOCK_STALL_NS);
+    }
+    return now;
+}
+
+static uint64_t simNanos64(void)
+{
+    uint32_t seq;
+    uint64_t baseNs, capNs, syncRealNs;
+    uint32_t rate;
+    do {
+        seq = __atomic_load_n(&simClockSeq, __ATOMIC_ACQUIRE);
+        baseNs = __atomic_load_n(&simClockBaseNs, __ATOMIC_RELAXED);
+        capNs = __atomic_load_n(&simClockCapNs, __ATOMIC_RELAXED);
+        syncRealNs = __atomic_load_n(&simClockRealNs, __ATOMIC_RELAXED);
+        rate = __atomic_load_n(&simClockRate, __ATOMIC_RELAXED);
+        __atomic_thread_fence(__ATOMIC_ACQUIRE);
+    } while ((seq & 1) || seq != __atomic_load_n(&simClockSeq, __ATOMIC_RELAXED));
+    return simClockAt(baseNs, capNs, syncRealNs, rate, nanos64_real());
+}
+
+// Restart the clock from where it is now: jumped by jumpNs, then advancing
+// at rate up to stepNs.
+static void simClockSet(uint64_t jumpNs, uint64_t stepNs, uint32_t rate)
+{
+    pthread_mutex_lock(&simClockWriteLock);
+    const uint64_t realNs = nanos64_real();
+    const uint64_t now = simClockAt(simClockBaseNs, simClockCapNs, simClockRealNs, simClockRate, realNs);
+    __atomic_store_n(&simClockSeq, simClockSeq + 1, __ATOMIC_RELAXED);
+    __atomic_thread_fence(__ATOMIC_RELEASE);
+    __atomic_store_n(&simClockBaseNs, now + jumpNs, __ATOMIC_RELAXED);
+    __atomic_store_n(&simClockCapNs, now + stepNs, __ATOMIC_RELAXED);
+    __atomic_store_n(&simClockRealNs, realNs, __ATOMIC_RELAXED);
+    __atomic_store_n(&simClockRate, rate, __ATOMIC_RELAXED);
+    __atomic_store_n(&simClockSeq, simClockSeq + 1, __ATOMIC_RELEASE);
+    pthread_mutex_unlock(&simClockWriteLock);
+}
+
+// stepS: interval since the previous packet, 0 if unknown (then the clock
+// holds until the next one).
+static void simClockPacket(double stepS)
+{
+    __atomic_store_n(&simClockPendingStep, (uint64_t)(1e9 * stepS + 0.5) + 1, __ATOMIC_RELEASE);
+}
+
+// Main thread, between scheduler() calls.
+static void simClockApplyPacket(void)
+{
+    const uint64_t pending = __atomic_exchange_n(&simClockPendingStep, 0, __ATOMIC_ACQUIRE);
+    if (pending) {
+        __atomic_add_fetch(&simStatApplied, 1, __ATOMIC_RELAXED);
+        const uint64_t stepNs = pending - 1;
+        simClockSet(stepNs > SIM_CLOCK_TAIL_NS ? stepNs - SIM_CLOCK_TAIL_NS : 0, stepNs, SIM_CLOCK_RATE);
+    }
+}
+
+static void simClockStop(void)
+{
+    simClockSet(0, 0, 0);
+}
+
+uint64_t micros64(void)
+{
+    return simNanos64() / 1000;
+}
+
+uint64_t millis64(void)
+{
+    return simNanos64() / (1000 * 1000);
+}
+#else
 uint64_t micros64(void)
 {
     static uint64_t last = 0;
@@ -719,6 +924,7 @@ uint64_t millis64(void)
 
     return out / (1000 * 1000);
 }
+#endif
 
 uint32_t micros(void)
 {
@@ -765,12 +971,25 @@ static void microsleep(uint32_t usec)
 
 void delayMicroseconds(uint32_t us)
 {
+#if ENABLE_SIMULATOR_GYROPID_SYNC
+    microsleep(us);  // the lockstep clock doesn't move with the wait
+#else
     microsleep(us / simRate);
+#endif
 }
 
 void delayMicroseconds_real(uint32_t us)
 {
+#if ENABLE_SIMULATOR_GYROPID_SYNC
+    // The main loop's only wait, between scheduler() calls: where a packet
+    // moves the clock.  Sleeping would let the clock run past the PID
+    // deadline (see SIM_CLOCK_RATE), so just yield.
+    UNUSED(us);
+    simClockApplyPacket();
+    sched_yield();
+#else
     microsleep(us);
+#endif
 }
 
 void delay(uint32_t ms)
@@ -879,7 +1098,15 @@ static void pwmCompleteMotorUpdate(void)
 
     // get one "fdm_packet" can only send one "servo_packet"!!
     if (pthread_mutex_trylock(&updateLock) != 0) return;
+#if ENABLE_SIMULATOR_GYROPID_SYNC
+    STATIC_ASSERT(DEBUG16_VALUE_COUNT == ARRAYLEN(((servo_packet_debug *)0)->debug), servo_packet_debug_size);
+    servo_packet_debug debugPkt = { .servo = pwmPkt };
+    memcpy(debugPkt.debug, debug, sizeof(debugPkt.debug));
+    udpSend(&pwmLink, &debugPkt, sizeof(debugPkt));
+    __atomic_add_fetch(&simStatSent, 1, __ATOMIC_RELAXED);
+#else
     udpSend(&pwmLink, &pwmPkt, sizeof(servo_packet));
+#endif
     udpSend(&pwmRawLink, &pwmRawPkt, sizeof(servo_packet_raw));
 }
 

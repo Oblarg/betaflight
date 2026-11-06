@@ -83,6 +83,9 @@
 #include "flight/mixer.h"
 #include "flight/pid.h"
 #include "flight/position.h"
+#ifdef USE_WHIPPYFLIGHT
+#include "flight/whippyflight_glue.h"
+#endif
 #include "flight/rpm_filter.h"
 #include "flight/servos.h"
 
@@ -508,6 +511,14 @@ if (crashFlipModeActive) {
         }
 #endif
 
+#ifdef USE_WHIPPYFLIGHT
+        if (whippyflightIsReadyToArm()) {
+            unsetArmingDisabled(ARMING_DISABLED_WHIPPYFLIGHT);
+        } else {
+            setArmingDisabled(ARMING_DISABLED_WHIPPYFLIGHT);
+        }
+#endif
+
 #ifdef USE_DSHOT_BITBANG
         if (isDshotBitbangActive(&motorConfig()->dev) && dshotBitbangGetStatus() != DSHOT_BITBANG_STATUS_OK) {
             setArmingDisabled(ARMING_DISABLED_DSHOT_BITBANG);
@@ -621,6 +632,10 @@ void disarm(flightLogDisarmReason_e reason)
     if (crashFlipModeActive) {
         crashFlipModeActive = false;
     }
+
+#ifdef USE_WHIPPYFLIGHT
+        whippyflight_reset();
+#endif
 
         // always set motor direction to normal on disarming
 #ifdef USE_DSHOT
@@ -1413,6 +1428,7 @@ void processRxModes(timeUs_t currentTimeUs)
     pidSetAntiGravityState(IS_RC_MODE_ACTIVE(BOXANTIGRAVITY) || featureIsEnabled(FEATURE_ANTI_GRAVITY));
 }
 
+#ifndef USE_WHIPPYFLIGHT
 static FAST_CODE_NOINLINE_CRITICAL void subTaskPidController(timeUs_t currentTimeUs)
 {
     uint32_t startTime = 0;
@@ -1466,6 +1482,7 @@ static FAST_CODE_NOINLINE_CRITICAL void subTaskPidController(timeUs_t currentTim
     }
 #endif
 }
+#endif // USE_WHIPPYFLIGHT
 
 static FAST_CODE_NOINLINE void subTaskPidSubprocesses(timeUs_t currentTimeUs)
 {
@@ -1499,6 +1516,7 @@ void subTaskTelemetryPollSensors(timeUs_t currentTimeUs)
 }
 #endif
 
+#ifndef USE_WHIPPYFLIGHT
 static FAST_CODE void subTaskMotorUpdate(timeUs_t currentTimeUs)
 {
     uint32_t startTime = 0;
@@ -1535,6 +1553,7 @@ static FAST_CODE void subTaskMotorUpdate(timeUs_t currentTimeUs)
 
     DEBUG_SET(DEBUG_PIDLOOP, 2, micros() - startTime);  //!< Motor Update Time [unit:us]
 }
+#endif // USE_WHIPPYFLIGHT
 
 static FAST_CODE_NOINLINE void subTaskRcCommand(timeUs_t currentTimeUs)
 {
@@ -1615,8 +1634,17 @@ FAST_CODE void taskMainPidLoop(timeUs_t currentTimeUs)
     // data, and before the PID controller so it reads this cycle's angle target.
     launchWingUpdate(currentTimeUs);
 #endif
+
+#ifdef USE_WHIPPYFLIGHT
+    // WhippyFlight replaces both the PID controller and the mixer with a
+    // single Rust LQR controller call.  Crashflip, disarm, failsafe, and
+    // motor stop are handled inside the glue layer.
+    whippyflightPidAndMotorUpdate(currentTimeUs);
+#else
     subTaskPidController(currentTimeUs);
     subTaskMotorUpdate(currentTimeUs);
+#endif
+
     subTaskPidSubprocesses(currentTimeUs);
 
     DEBUG_SET(DEBUG_CYCLETIME, 0, getTaskDeltaTimeUs(TASK_SELF));  //!< Cycle Time [unit:us]

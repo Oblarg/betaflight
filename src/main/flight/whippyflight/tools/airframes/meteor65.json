@@ -1,0 +1,124 @@
+{
+  "yaw": {
+    "yawRate": -1.5122453665584237,
+    "propVelSumSq": 4.8682281926225826e-05,
+    "propAccelSum": 0.0030594457334088285
+  },
+  "pitch": {
+    "pitchRate": 0.7024389110924613,
+    "propVelSumSq": 0.0002934088599815502,
+    "dFront": 1.0,
+    "dBack": 1.0856154931168316
+  },
+  "roll": {
+    "rollRate": 1.2612784020193137,
+    "propVelSumSq": 0.0003434081413733568,
+    "dLeft": 1.116803876697371,
+    "dRight": 1.0
+  },
+  "motors": {
+    "motorVel": 0.006572909232846221,
+    "motorVelSq": 2.749797043793432e-06,
+    "motorAccel": 0.0003504673209083212
+  },
+  "drag": {
+    "axes": [],
+    "lp_hz": 5.0
+  },
+  "fit": {
+    "sources": [
+      "initial_full_test/btfl_001.bbl#1"
+    ],
+    "volts": "r",
+    "select": "robust",
+    "arms": {
+      "pitch": {
+        "ratio": 1.0856154931168316,
+        "se": 0.0034800335900030243,
+        "source": "fit",
+        "r2_profile": {
+          "0.8x": 0.91985,
+          "0.9x": 0.96739,
+          "1x": 0.98187,
+          "1.1x": 0.97019,
+          "1.25x": 0.9221
+        }
+      },
+      "roll": {
+        "ratio": 1.116803876697371,
+        "se": 0.005982867280645372,
+        "source": "fit",
+        "r2_profile": {
+          "0.8x": 0.96155,
+          "0.9x": 0.97896,
+          "1x": 0.98412,
+          "1.1x": 0.97988,
+          "1.25x": 0.96144
+        }
+      }
+    },
+    "yaw": {
+      "r2": 0.9546,
+      "rows": 4258,
+      "rel_se": {
+        "yawRate": 0.01331,
+        "propVelSumSq": 0.0084,
+        "propAccelSum": 0.00444
+      }
+    },
+    "pitch": {
+      "r2": 0.9819,
+      "rows": 1345,
+      "rel_se": {
+        "pitchRate": 0.04193,
+        "propVelSumSq": 0.00371
+      }
+    },
+    "roll": {
+      "r2": 0.9841,
+      "rows": 1183,
+      "rel_se": {
+        "rollRate": 0.0247,
+        "propVelSumSq": 0.0037
+      }
+    },
+    "motors": {
+      "r2": 0.9487,
+      "rows": 126895,
+      "rel_se": {
+        "motorVel": 0.00119,
+        "motorVelSq": 0.00913,
+        "motorAccel": 0.00149
+      }
+    }
+  },
+  "airframe": {
+    "vbat_v": 3.85,
+    "hover_rps": 267.3,
+    "cells": 1,
+    "craft": "M65Pro",
+    "board": "BEFH BETAFPVF411",
+    "firmware": "Betaflight 4.5.1 (77d01ba3b) STM32F411",
+    "motor_poles": 12,
+    "loop_hz": 3205.1,
+    "vbatcellvoltage": [
+      330,
+      350,
+      435
+    ],
+    "gyro_lpf": [
+      {
+        "type": "PT1",
+        "hz": 275,
+        "max_hz": 550
+      },
+      {
+        "type": "PT1",
+        "hz": 550
+      }
+    ],
+    "mixer": "QUADX",
+    "yaw_motors_reversed": true,
+    "dump": "BTFL_cli_M65PRO_20250718_154417_BETAFPVF411.txt"
+  }
+}

@@ -72,6 +72,9 @@ void pgResetFn_sdcardConfig(sdcardConfig_t *config)
 #elif defined(USE_SDCARD_SPI)
     config->mode = SDCARD_MODE_SPI;
 #endif
+#elif defined(USE_SDCARD_SITL)
+    // Any mode but NONE enables the SITL file-backed card.
+    config->mode = SDCARD_MODE_SPI;
 #else
     config->mode = SDCARD_MODE_NONE;
 #endif

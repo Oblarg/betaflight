@@ -36,6 +36,7 @@
 #include "drivers/flash/flash_m25p16.h"
 #include "drivers/flash/flash_mt29f.h"
 #include "drivers/flash/flash_mx66uw1g45g.h"
+#include "drivers/flash/flash_sitl.h"
 #include "drivers/flash/flash_w25n.h"
 #include "drivers/flash/flash_w25q128fv.h"
 #include "drivers/flash/flash_w25m.h"
@@ -449,6 +450,10 @@ static bool flashDeviceInit(const flashConfig_t *flashConfig)
     UNUSED(flashConfig);
 #endif
 
+#ifdef USE_FLASH_SITL
+    haveFlash = sitlFlashInit(&flashDevice);
+#endif
+
 #ifdef USE_FLASH_SPI
     bool useSpi = (SPI_CFG_TO_DEV(flashConfig->spiDevice) != SPIINVALID);
 
@@ -670,7 +675,7 @@ const char *flashTypeGetName(flashType_e type)
 
 static void flashConfigurePartitions(void)
 {
-#if defined(FIRMWARE_SIZE) || defined(CONFIG_IN_EXTERNAL_FLASH) || defined(CONFIG_IN_MEMORY_MAPPED_FLASH) || defined(USE_FLASHFS)
+#if defined(FIRMWARE_SIZE) || defined(CONFIG_IN_EXTERNAL_FLASH) || defined(CONFIG_IN_MEMORY_MAPPED_FLASH) || defined(USE_FLASHFS) || defined(USE_WHIPPYFLIGHT)
     const flashGeometry_t *flashGeometry = flashGetGeometry();
     if (flashGeometry->totalSize == 0) {
         return;
@@ -715,6 +720,27 @@ static void flashConfigurePartitions(void)
 
     endSector = startSector - 1;
     startSector = 0;
+#endif
+
+#ifdef USE_WHIPPYFLIGHT
+    // Gain blob storage; copied to RAM at boot (SPI reads are too slow to
+    // serve the tables per loop).  Carved from the top so FLASHFS keeps
+    // sector 0.
+    const uint32_t gainStoreSize = WHIPPYFLIGHT_GAIN_STORE_SIZE;
+    flashSector_t gainSectors = (gainStoreSize / flashGeometry->sectorSize);
+
+    if (gainStoreSize % flashGeometry->sectorSize > 0) {
+        gainSectors++; // needs a portion of a sector.
+    }
+
+    if (gainSectors <= endSector) {
+        startSector = (endSector + 1) - gainSectors; // + 1 for inclusive
+
+        flashPartitionSet(FLASH_PARTITION_TYPE_WHIPPYFLIGHT, startSector, endSector);
+
+        endSector = startSector - 1;
+        startSector = 0;
+    }
 #endif
 
 #ifdef USE_FLASHFS
@@ -767,6 +793,7 @@ static const char *flashPartitionNames[] = {
     "BBMGMT   ",
     "FIRMWARE ",
     "CONFIG   ",
+    "WFGAINS  ",
 };
 
 const char *flashPartitionGetTypeName(flashPartitionType_e type)

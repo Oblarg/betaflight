@@ -1,5 +1,6 @@
 [build]
-# Default target for `cargo build` — Cortex-M4F/M7F with hardware float (STM32F4/F7/H7)
+# Default target for `cargo build` — ARMv7E-M with hardware float.
+# Covers Cortex-M4F (STM32F411) and Cortex-M7F (STM32F7/H7) — same ISA.
 target = "thumbv7em-none-eabihf"
 
 [target.thumbv7em-none-eabihf]

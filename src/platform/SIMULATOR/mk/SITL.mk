@@ -68,6 +68,15 @@ ifneq ($(filter macosx-arm% macosx-x86_64%,$(OSFAMILY)-$(ARCHFAMILY)),)
 
     CFLAGS_DISABLED := -Werror -Wunsafe-loop-optimizations -fuse-linker-plugin
 
+    # Default Rust target for WhippyFlight on macOS
+    WHIPPYFLIGHT_TARGET ?= aarch64-apple-darwin
+
+    # WhippyFlight: link the Rust LQR controller staticlib.
+    ifneq ($(filter USE_WHIPPYFLIGHT,$(OPTIONS)),)
+        WHIPPYFLIGHT_LIB_DIR ?= $(ROOT)/src/main/flight/whippyflight/target/$(WHIPPYFLIGHT_TARGET)/release
+        EXTRA_LD_FLAGS += -L$(WHIPPYFLIGHT_LIB_DIR) -lwhippyflight_control
+    endif
+
     ifneq ($(filter SITL_STATIC,$(OPTIONS)),)
         $(error Static builds are not supported on MacOS)
     endif
@@ -78,5 +87,6 @@ ifneq ($(filter macosx-arm% macosx-x86_64%,$(OSFAMILY)-$(ARCHFAMILY)),)
             $(ARCH_FLAGS) \
             $(LTO_FLAGS) \
             $(DEBUG_FLAGS) \
-            -Wl,-map,$(TARGET_MAP)
+            -Wl,-map,$(TARGET_MAP) \
+            $(EXTRA_LD_FLAGS)
 endif

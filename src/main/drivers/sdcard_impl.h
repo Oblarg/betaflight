@@ -129,3 +129,6 @@ extern sdcardVTable_t sdcardSpiVTable;
 #ifdef USE_SDCARD_SDIO
 extern sdcardVTable_t sdcardSdioVTable;
 #endif
+#ifdef USE_SDCARD_SITL
+extern sdcardVTable_t sdcardSitlVTable;
+#endif
