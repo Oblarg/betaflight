@@ -14,10 +14,10 @@ static DEFAULT_JSON: &str = include_str!("../../tools/airframes/meteor65.json");
 
 /// Battery voltage and hover motor speed when the JSON has no fitted
 /// `airframe` block: the Meteor65 Pro (1S) test airframe.
-const DEFAULT_BATTERY_V: f64 = 4.2;
-const DEFAULT_HOVER_RPS: f64 = 270.0;
-/// Its gyro low-pass stages (BF type, Hz), for JSONs without `gyro_lpf`.
-const DEFAULT_GYRO_LPF: [(&str, f64); 2] = [("PT1", 275.0), ("PT1", 550.0)];
+const DEFAULT_BATTERY_V: Voltage = Voltage::new(4.2);
+const DEFAULT_HOVER_RPS: Rate = Rate::new(270.0);
+/// Its gyro low-pass stages (BF type, cutoff), for JSONs without `gyro_lpf`.
+const DEFAULT_GYRO_LPF: [(&str, Freq); 2] = [("PT1", Freq::new(275.0)), ("PT1", Freq::new(550.0))];
 
 /// Plant coefficients, in gen_wfg's conventions (model axes, motors by BF index).
 pub struct Model {
@@ -66,7 +66,7 @@ impl Model {
                     (kind.to_string(), Freq::new(hz))
                 })
                 .collect(),
-            None => DEFAULT_GYRO_LPF.iter().map(|&(k, hz)| (k.to_string(), Freq::new(hz))).collect(),
+            None => DEFAULT_GYRO_LPF.iter().map(|&(k, f)| (k.to_string(), f)).collect(),
         };
         Model {
             yaw_rate: PerTime::new(get("yaw", "yawRate")),
@@ -83,8 +83,8 @@ impl Model {
             w_back: 2.0 * d_back / (d_front + d_back),
             w_left: 2.0 * d_left / (d_left + d_right),
             w_right: 2.0 * d_right / (d_left + d_right),
-            battery_v: Voltage::new(opt("airframe", "vbat_v", DEFAULT_BATTERY_V)),
-            hover_rps: Rate::new(opt("airframe", "hover_rps", DEFAULT_HOVER_RPS)),
+            battery_v: c["airframe"]["vbat_v"].as_f64().map_or(DEFAULT_BATTERY_V, Voltage::new),
+            hover_rps: c["airframe"]["hover_rps"].as_f64().map_or(DEFAULT_HOVER_RPS, Rate::new),
             gyro_lpf,
             source: source.to_string(),
         }

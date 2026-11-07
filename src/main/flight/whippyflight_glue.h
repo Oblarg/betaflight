@@ -6,9 +6,9 @@
  * enabled.
  *
  * The Rust staticlib (whippyflight-control) is linked via EXTRA_LD_FLAGS.
- * All unit conversion (deg/s → rot/s, centivolts → V, eRPM → rot/s,
- * duty → DShot) happens in the C glue — the Rust side uses clean SI
- * units exclusively.
+ * Its inputs are in BF's own units (deg/s, centivolts, eRPM/100, Hz, µs) and
+ * its telemetry comes back in the units BF logs, so the glue copies values
+ * through; the Rust side converts them.
  */
 
 #pragma once
@@ -25,9 +25,9 @@
 // ---------------------------------------------------------------------------
 
 typedef struct {
-    float gyro_rps[3];       // rot/s, [roll, pitch, yaw]
-    float motor_rps[4];      // eRPM/600 (regression unit), by BF motor index
-    float battery_voltage;   // volts
+    float gyro[3];           // deg/s (gyro.gyroADCf), [roll, pitch, yaw]
+    float motor_erpm[4];     // eRPM/100 (getDshotErpm), by BF motor index
+    float battery;           // centivolts (getBatteryVoltage)
     float accel_g[3];        // g, body [x, y, z]; zero without an accelerometer
 } wf_sensor_data_t;
 
@@ -35,20 +35,20 @@ typedef struct {
     float motor_duty[4];     // [0, 1], [REAR_R, FRONT_R, REAR_L, FRONT_L]
 } wf_control_output_t;
 
+// Telemetry, already in the units BF logs it in: copy each field into its
+// slot as is.  The pidData fields are floats in the unit of one logged count
+// (blackbox lrintf()s them); the debug fields are rounded to int16_t.
 typedef struct {
-    float feedback_v[4];
-    float feedforward_v[4];
-    float affine_v[4];
-    float error_prop[3];
-    float error_integral[3];
-    float error_derivative[3];
-    float kp_motor0[3];
-    float collective_v;      // V, along the thrust-balanced direction
-    float command_scale;     // allocator attitude scale, 1 unless saturated
-    float setpoint_rps[3];   // tracked rate setpoint, rot/s
-    float ff_target_rps[3];  // feedforward h-tick-ahead target, rot/s
-    uint8_t status;
-} wf_lqr_telemetry_t;
+    float pid_p[3];               // pidData P, Sum: rate error, 0.1 deg/s
+    float pid_i[3];               // pidData I: integrated rate error, 0.1 deg
+    float pid_d[3];               // pidData D: rate-error derivative, deg/s²
+    int16_t feedback[4];          // per-motor feedback voltage, mV
+    int16_t raw_setpoint[3];      // last RX rate setpoint, 0.1 deg/s
+    int16_t setpoint[3];          // tracked rate setpoint, 0.1 deg/s
+    int16_t ff_target[3];         // feedforward target, 0.1 deg/s
+    int16_t feedforward_motor0;   // motor 0 feedforward voltage, cV
+    int16_t command_scale;        // allocator attitude scale, ‰ (1000 unless saturated)
+} wf_bf_telemetry_t;
 
 // GainLoadResult — matches repr(C) enum in types.rs.
 typedef enum {
@@ -70,10 +70,10 @@ typedef enum {
 extern wf_gain_load_result_t whippyflight_init(
     const uint8_t *gains_buf, uint32_t gains_len);
 
-// One RX frame: raw rate setpoint (rot/s, [roll, pitch, yaw]), its arrival
-// time on the micros() clock, and the current RX period in seconds.
+// One RX frame: raw rate setpoint (deg/s, [roll, pitch, yaw]), its arrival
+// time on the micros() clock, and the current RX rate in Hz.
 extern void whippyflight_setpoint_packet(
-    const float rate_rps[3], uint32_t time_us, float rx_period_s);
+    const float rate_dps[3], uint32_t time_us, float rx_rate_hz);
 
 // throttle in [0, 1]; now_us on the same clock as the packet timestamps.
 extern wf_control_output_t whippyflight_update(
@@ -81,9 +81,11 @@ extern wf_control_output_t whippyflight_update(
 
 extern void whippyflight_reset(void);
 
-extern void whippyflight_set_min_rps(float rps);
+// Dynamic idle floor: dyn_idle_min_rpm (mechanical RPM/100) and motorPoleCount.
+extern void whippyflight_set_min_speed(float dyn_idle_min_rpm, uint8_t pole_count);
 
-extern const wf_lqr_telemetry_t *whippyflight_telemetry(void);
+// NULL before the controller has run; valid until the next call.
+extern const wf_bf_telemetry_t *whippyflight_telemetry(void);
 
 // ---------------------------------------------------------------------------
 // C glue entry points.

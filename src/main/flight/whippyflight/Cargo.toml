@@ -12,16 +12,15 @@ crate-type = ["staticlib", "lib"]
 
 [dependencies]
 # Unit-safe quantities — no_std, no alloc
-# NOTE: path deps point at the local whippyunits checkout for development.
-# Switch back to git deps for release/CI.
-whippyunits = { path = "../../../../../whippyunits", default-features = false }
+# >= 0.3.4 for standard gravity (`g_n`).
+whippyunits = { version = "0.3.4", default-features = false }
 # Unit-safe linear algebra over nalgebra — no_std, no alloc
 # Correctly rounded sqrtf for no_std (core has none); already in the
 # dependency graph through whippyunits.
 libm = "0.2"
 # Zero-copy typed views of the gain blob's tables.
 bytemuck = { version = "1", default-features = false }
-whippyalgebra = { path = "../../../../../whippyunits/whippyalgebra", default-features = false, features = ["nalgebra"] }
+whippyalgebra = { version = "0.1.1", default-features = false, features = ["nalgebra"] }
 
 [dev-dependencies]
 # Eval plant reads gen_wfg's coefficient JSON.
@@ -45,3 +44,4 @@ panic = "abort"
 
 # panic = "abort" for dev is set via .cargo/config.toml for embedded builds;
 # omitted here so `cargo test` on host can use the default unwinding harness.
+

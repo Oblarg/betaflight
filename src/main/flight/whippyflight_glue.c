@@ -55,39 +55,32 @@
 #include "sensors/sensors.h"
 
 // ---------------------------------------------------------------------------
-// Unit conversion constants (must match types.rs).
+// Sensor helpers.  The controller takes BF's values in BF's units (see
+// whippyflight_glue.h); SITL has neither bidirectional DShot nor a voltage
+// meter, and the simulator's ESC telemetry stands in for both in the same
+// units as the getters it replaces.
 // ---------------------------------------------------------------------------
 
-#define BF_DPS_TO_RPS          (1.0f / 360.0f)
-#define BF_CENTIVOLTS_TO_V     (0.01f)
-#define BF_ERPM_LSB_TO_MODEL_RPS (1.0f / 6.0f)
-
-// ---------------------------------------------------------------------------
-// Motor speed helper
-// ---------------------------------------------------------------------------
-
-// Returns motor speed in the regression's unit (eRPM/600, see main.R), which
-// is what the gain grid and affine linearizer are parameterised in.
-// SITL has neither bidirectional DShot nor a voltage meter; the simulator's
-// ESC telemetry stands in for both.
-static float getMotorModelRps(int motorIndex)
+// Motor speed as getDshotErpm() reports it: eRPM/100.
+static float getMotorErpm(int motorIndex)
 {
 #if defined(SIMULATOR_BUILD)
-    return sitlGetMotorErpm(motorIndex) / 600.0f;
+    return sitlGetMotorErpm(motorIndex);
 #elif defined(USE_DSHOT_TELEMETRY)
-    return getDshotErpm(motorIndex) * BF_ERPM_LSB_TO_MODEL_RPS;
+    return getDshotErpm(motorIndex);
 #else
     UNUSED(motorIndex);
     return 0.0f;
 #endif
 }
 
-static float getBatteryVolts(void)
+// Battery voltage as getBatteryVoltage() reports it: centivolts.
+static float getBatteryCentivolts(void)
 {
 #ifdef SIMULATOR_BUILD
     return sitlGetBatteryVoltage();
 #else
-    return getBatteryVoltage() * BF_CENTIVOLTS_TO_V;
+    return getBatteryVoltage();
 #endif
 }
 
@@ -104,14 +97,6 @@ static void getAccelG(float out[3])
     }
 #endif
     out[0] = out[1] = out[2] = 0.0f;
-}
-
-// dyn_idle_min_rpm (mechanical RPM / 100) in model units:
-// eRPM/600 = RPM * (poles / 2) / 600.
-static float getDynIdleModelRps(void)
-{
-    const float mechRpm = currentPidProfile->dyn_idle_min_rpm * 100.0f;
-    return mechRpm * (motorConfig()->motorPoleCount / 2.0f) / 600.0f;
 }
 
 // ---------------------------------------------------------------------------
@@ -132,27 +117,27 @@ void whippyflightPidAndMotorUpdate(timeUs_t currentTimeUs)
 
     if (mixerApplyCrashFlipIfActive(currentTimeUs)) {
         writeMotors();
-        DEBUG_SET(DEBUG_PIDLOOP, 1, micros() - startTime);
+        DEBUG_SET(DEBUG_PIDLOOP, 1, micros() - startTime);  //!< PID Controller Time [unit:us]
         return;
     }
 
     // -----------------------------------------------------------------------
-    // 2. Gather sensor data and convert from BF units to WhippyFlight units.
+    // 2. Gather sensor data, in BF's units.
     // -----------------------------------------------------------------------
 
     wf_sensor_data_t sensors = {
-        .gyro_rps = {
-            gyro.gyroADCf[FD_ROLL]  * BF_DPS_TO_RPS,
-            gyro.gyroADCf[FD_PITCH] * BF_DPS_TO_RPS,
-            gyro.gyroADCf[FD_YAW]   * BF_DPS_TO_RPS,
+        .gyro = {
+            gyro.gyroADCf[FD_ROLL],
+            gyro.gyroADCf[FD_PITCH],
+            gyro.gyroADCf[FD_YAW],
         },
-        .motor_rps = {
-            getMotorModelRps(0),
-            getMotorModelRps(1),
-            getMotorModelRps(2),
-            getMotorModelRps(3),
+        .motor_erpm = {
+            getMotorErpm(0),
+            getMotorErpm(1),
+            getMotorErpm(2),
+            getMotorErpm(3),
         },
-        .battery_voltage = getBatteryVolts(),
+        .battery = getBatteryCentivolts(),
     };
     getAccelG(sensors.accel_g);
 
@@ -162,19 +147,19 @@ void whippyflightPidAndMotorUpdate(timeUs_t currentTimeUs)
     const uint32_t rcFrameCount = getRcFrameCount();
     if (rcFrameCount != lastRcFrameCount) {
         lastRcFrameCount = rcFrameCount;
-        const float rawRateRps[3] = {
-            getRawSetpoint(FD_ROLL)  * BF_DPS_TO_RPS,
-            getRawSetpoint(FD_PITCH) * BF_DPS_TO_RPS,
-            getRawSetpoint(FD_YAW)   * BF_DPS_TO_RPS,
+        const float rawRate[3] = {
+            getRawSetpoint(FD_ROLL),
+            getRawSetpoint(FD_PITCH),
+            getRawSetpoint(FD_YAW),
         };
-        whippyflight_setpoint_packet(rawRateRps, getRcFrameTimeUs(), 1.0f / getCurrentRxRateHz());
+        whippyflight_setpoint_packet(rawRate, getRcFrameTimeUs(), getCurrentRxRateHz());
     }
 
     // -----------------------------------------------------------------------
     // 3. Run the Rust LQR controller.
     // -----------------------------------------------------------------------
 
-    whippyflight_set_min_rps(getDynIdleModelRps());
+    whippyflight_set_min_speed(currentPidProfile->dyn_idle_min_rpm, motorConfig()->motorPoleCount);
     const wf_control_output_t output = whippyflight_update(&sensors, rcCommand[THROTTLE], currentTimeUs);
 
     // -----------------------------------------------------------------------
@@ -235,21 +220,22 @@ void whippyflightPidAndMotorUpdate(timeUs_t currentTimeUs)
     //    We write our LQR telemetry into pidData[] so the existing blackbox
     //    infrastructure logs it without modification.  The semantics differ
     //    from BF's PID, but the fields are still useful for tuning:
-    //      P = per-axis proportional error (rot/s)
-    //      I = per-axis integral state (rot)
-    //      D = per-axis derivative state (rot/s²)
+    //      P = per-axis rate error (0.1 deg/s)
+    //      I = per-axis integrated rate error (0.1 deg)
+    //      D = per-axis rate-error derivative (deg/s²)
     //      F = 0 (feedforward is per-motor in our system)
-    //    Motor[] is already populated above.
+    //    Motor[] is already populated above.  The Rust side encodes every
+    //    field in the unit it is logged in, so nothing is scaled here.
     // -----------------------------------------------------------------------
 
-    const wf_lqr_telemetry_t *telem = whippyflight_telemetry();
+    const wf_bf_telemetry_t *telem = whippyflight_telemetry();
     if (telem != NULL) {
         for (int axis = 0; axis < XYZ_AXIS_COUNT; axis++) {
-            pidData[axis].P = telem->error_prop[axis];
-            pidData[axis].I = telem->error_integral[axis];
-            pidData[axis].D = telem->error_derivative[axis];
+            pidData[axis].P = telem->pid_p[axis];
+            pidData[axis].I = telem->pid_i[axis];
+            pidData[axis].D = telem->pid_d[axis];
             pidData[axis].F = 0.0f;
-            pidData[axis].Sum = telem->error_prop[axis]; // best single summary
+            pidData[axis].Sum = telem->pid_p[axis]; // best single summary
         }
     } else {
         for (int axis = 0; axis < XYZ_AXIS_COUNT; axis++) {
@@ -264,25 +250,24 @@ void whippyflightPidAndMotorUpdate(timeUs_t currentTimeUs)
     // LQR-specific telemetry via debug channels.
     if (telem != NULL && debugMode == DEBUG_NONE) {
         // Repurpose debug slots for LQR feedback voltage (motor 0–3).
-        DEBUG_SET(DEBUG_NONE, 0, lrintf(telem->feedback_v[0] * 1000));
-        DEBUG_SET(DEBUG_NONE, 1, lrintf(telem->feedback_v[1] * 1000));
-        DEBUG_SET(DEBUG_NONE, 2, lrintf(telem->feedback_v[2] * 1000));
-        DEBUG_SET(DEBUG_NONE, 3, lrintf(telem->feedback_v[3] * 1000));
+        DEBUG_SET(DEBUG_NONE, 0, telem->feedback[0]);  //!< Feedback Voltage Motor 0 [unit:0.001V]
+        DEBUG_SET(DEBUG_NONE, 1, telem->feedback[1]);  //!< Feedback Voltage Motor 1 [unit:0.001V]
+        DEBUG_SET(DEBUG_NONE, 2, telem->feedback[2]);  //!< Feedback Voltage Motor 2 [unit:0.001V]
+        DEBUG_SET(DEBUG_NONE, 3, telem->feedback[3]);  //!< Feedback Voltage Motor 3 [unit:0.001V]
     }
 
     // Setpoint reconstruction, in 0.1 deg/s (the feedforward lead is only a
     // few deg/s): raw RX setpoint, the estimate the controller tracked, and
     // the feedforward target, for roll and pitch.
     if (telem != NULL && debugMode == DEBUG_WHIPPYFLIGHT) {
-        const float toDebug = 10.0f / BF_DPS_TO_RPS;
-        DEBUG_SET(DEBUG_WHIPPYFLIGHT, 0, lrintf(getRawSetpoint(FD_ROLL) * 10.0f));
-        DEBUG_SET(DEBUG_WHIPPYFLIGHT, 1, lrintf(telem->setpoint_rps[FD_ROLL] * toDebug));
-        DEBUG_SET(DEBUG_WHIPPYFLIGHT, 2, lrintf(telem->ff_target_rps[FD_ROLL] * toDebug));
-        DEBUG_SET(DEBUG_WHIPPYFLIGHT, 3, lrintf(getRawSetpoint(FD_PITCH) * 10.0f));
-        DEBUG_SET(DEBUG_WHIPPYFLIGHT, 4, lrintf(telem->setpoint_rps[FD_PITCH] * toDebug));
-        DEBUG_SET(DEBUG_WHIPPYFLIGHT, 5, lrintf(telem->ff_target_rps[FD_PITCH] * toDebug));
-        DEBUG_SET(DEBUG_WHIPPYFLIGHT, 6, lrintf(telem->feedforward_v[0] * 100));
-        DEBUG_SET(DEBUG_WHIPPYFLIGHT, 7, lrintf(telem->command_scale * 1000));
+        DEBUG_SET(DEBUG_WHIPPYFLIGHT, 0, telem->raw_setpoint[FD_ROLL]);  //!< Raw Setpoint Roll [unit:0.1dps]
+        DEBUG_SET(DEBUG_WHIPPYFLIGHT, 1, telem->setpoint[FD_ROLL]);      //!< Setpoint Estimate Roll [unit:0.1dps]
+        DEBUG_SET(DEBUG_WHIPPYFLIGHT, 2, telem->ff_target[FD_ROLL]);     //!< Feedforward Target Roll [unit:0.1dps]
+        DEBUG_SET(DEBUG_WHIPPYFLIGHT, 3, telem->raw_setpoint[FD_PITCH]); //!< Raw Setpoint Pitch [unit:0.1dps]
+        DEBUG_SET(DEBUG_WHIPPYFLIGHT, 4, telem->setpoint[FD_PITCH]);     //!< Setpoint Estimate Pitch [unit:0.1dps]
+        DEBUG_SET(DEBUG_WHIPPYFLIGHT, 5, telem->ff_target[FD_PITCH]);    //!< Feedforward Target Pitch [unit:0.1dps]
+        DEBUG_SET(DEBUG_WHIPPYFLIGHT, 6, telem->feedforward_motor0);     //!< Feedforward Voltage Motor 0 [unit:0.01V]
+        DEBUG_SET(DEBUG_WHIPPYFLIGHT, 7, telem->command_scale);          //!< Attitude Command Scale [unit:0.001]
     }
 
     // -----------------------------------------------------------------------
@@ -291,7 +276,7 @@ void whippyflightPidAndMotorUpdate(timeUs_t currentTimeUs)
 
     writeMotors();
 
-    DEBUG_SET(DEBUG_PIDLOOP, 1, micros() - startTime);
+    DEBUG_SET(DEBUG_PIDLOOP, 1, micros() - startTime);  //!< PID Controller Time [unit:us]
 }
 
 // ---------------------------------------------------------------------------

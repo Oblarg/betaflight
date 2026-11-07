@@ -191,28 +191,28 @@ pub const BALANCE_FLOATS: usize = 4;
 ///
 /// Rotor drag on tall frames acts well above the CG, so airspeed torques
 /// pitch and roll.  In flight the accelerometer reads thrust (body z) plus
-/// that drag, so its body x/y components (g), one-pole low-passed at
-/// `lp_hz`, measure it; the coefficients (rot/s² per g, BF axes) give the
-/// angular acceleration it causes.  `lp_hz = 0` turns the mode off.
+/// that drag, so its body x/y components, one-pole low-passed at `lp_hz`,
+/// measure it; the coefficients (rot/m, i.e. rot/s² per m/s², BF axes) give the angular
+/// acceleration it causes.  `lp_hz = 0` turns the mode off.
 pub const DRAG_FLOATS: usize = 5;
 
-/// The airframe drag block, see [`DRAG_FLOATS`].  The accelerometer reads
-/// in g₀ (a ratio), so each coefficient is an angular acceleration per g₀.
+/// The airframe drag block, see [`DRAG_FLOATS`]: angular acceleration per
+/// unit of body specific force.
 #[derive(Clone, Copy, PartialEq)]
 #[cfg_attr(feature = "std", derive(Debug))]
 pub struct AirframeDrag {
     pub lp: Hertz,
-    /// Roll angular acceleration per g₀ of body [x, y] specific force.
-    pub roll: [RotPerSecSq; 2],
-    /// Pitch angular acceleration per g₀ of body [x, y] specific force.
-    pub pitch: [RotPerSecSq; 2],
+    /// Roll angular acceleration per body [x, y] specific force.
+    pub roll: [RotPerMeter; 2],
+    /// Pitch angular acceleration per body [x, y] specific force.
+    pub pitch: [RotPerMeter; 2],
 }
 
 impl AirframeDrag {
     pub const OFF: Self = Self {
         lp: Hertz::new(0.0),
-        roll: [RotPerSecSq::new(0.0); 2],
-        pitch: [RotPerSecSq::new(0.0); 2],
+        roll: [RotPerMeter::new(0.0); 2],
+        pitch: [RotPerMeter::new(0.0); 2],
     };
 }
 

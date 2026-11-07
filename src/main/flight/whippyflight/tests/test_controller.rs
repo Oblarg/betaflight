@@ -11,6 +11,7 @@ const DT: Seconds = Seconds::new(0.000125);
 const BATTERY: Volt = Volt::new(12.0);
 
 /// Diagonal gains for [`make_identity_gains`].
+#[derive(Clone, Copy)]
 struct Diag {
     kp: VoltPerRps,
     ki: VoltPerRot,
@@ -18,8 +19,13 @@ struct Diag {
     binv: VoltPerRps,
 }
 
-fn diag(kp: f32, ki: f32, kd: f32, binv: f32) -> Diag {
-    Diag { kp: VoltPerRps::new(kp), ki: VoltPerRot::new(ki), kd: VoltPerRpsPerSec::new(kd), binv: VoltPerRps::new(binv) }
+impl Diag {
+    const ZERO: Self = Self {
+        kp: VoltPerRps::new(0.0),
+        ki: VoltPerRot::new(0.0),
+        kd: VoltPerRpsPerSec::new(0.0),
+        binv: VoltPerRps::new(0.0),
+    };
 }
 
 /// Build a gain blob with identity-like gains for testing.
@@ -67,26 +73,26 @@ fn make_identity_gains(resolution: u8, gains: &Diag, dt: Seconds) -> Vec<u8> {
     buf
 }
 
-fn load_identity_gains(kp: f32, ki: f32, kd: f32, binv: f32) -> GainStorage {
-    let blob = make_identity_gains(2, &diag(kp, ki, kd, binv), DT);
+fn load_identity_gains(gains: Diag) -> GainStorage {
+    let blob = make_identity_gains(2, &gains, DT);
     let mut storage = GainStorage::new();
     let result = load_gains(common::static_blob(&blob), &mut storage);
     assert_eq!(result, GainLoadResult::Ok);
     storage
 }
 
-fn make_sensors(gyro: [f32; 3], battery_v: f32) -> SensorData {
+fn make_sensors(gyro: [RotPerSec; 3], battery_v: Volt) -> SensorData {
     SensorData {
-        gyro_rps: gyro.map(RotPerSec::new),
+        gyro_rps: gyro,
         motor_rps: [RotPerSec::new(200.0); 4],
-        battery_voltage: Volt::new(battery_v),
-        accel_g: [0.0; 3],
+        battery_voltage: battery_v,
+        accel: [MetersPerSecSq::new(0.0); 3],
     }
 }
 
-fn make_setpoint(rates: [f32; 3], throttle: f32) -> SetpointData {
+fn make_setpoint(rates: [RotPerSec; 3], throttle: f32) -> SetpointData {
     SetpointData {
-        rate_rps: rates.map(RotPerSec::new),
+        rate_rps: rates,
         throttle,
     }
 }
@@ -100,8 +106,8 @@ fn no_gains_returns_zero_output() {
     let mut ctrl = ControllerState::new();
     let storage = GainStorage::new(); // loaded = false
 
-    let sensors = make_sensors([0.0; 3], 12.0);
-    let setpoint = make_setpoint([1.0, 0.0, 0.0], 0.5);
+    let sensors = make_sensors([0.0; 3].map(RotPerSec::new), BATTERY);
+    let setpoint = make_setpoint([1.0, 0.0, 0.0].map(RotPerSec::new), 0.5);
 
     let output = ctrl.update(&sensors, &setpoint, &storage);
     assert_eq!(output.motor_duty, [0.0; 4]);
@@ -110,12 +116,12 @@ fn no_gains_returns_zero_output() {
 
 #[test]
 fn zero_error_produces_throttle_only() {
-    let gains = load_identity_gains(1.0, 0.0, 0.0, 0.0);
+    let gains = load_identity_gains(Diag { kp: VoltPerRps::new(1.0), ..Diag::ZERO });
     let mut ctrl = ControllerState::new();
 
     // Gyro matches setpoint exactly → zero error → zero feedback/feedforward
-    let sensors = make_sensors([1.0, 0.0, 0.0], 12.0);
-    let setpoint = make_setpoint([1.0, 0.0, 0.0], 0.5);
+    let sensors = make_sensors([1.0, 0.0, 0.0].map(RotPerSec::new), BATTERY);
+    let setpoint = make_setpoint([1.0, 0.0, 0.0].map(RotPerSec::new), 0.5);
 
     let output = ctrl.update(&sensors, &setpoint, &gains);
 
@@ -135,12 +141,12 @@ fn zero_error_produces_throttle_only() {
 
 #[test]
 fn proportional_error_generates_feedback() {
-    let gains = load_identity_gains(1.0, 0.0, 0.0, 0.0);
+    let gains = load_identity_gains(Diag { kp: VoltPerRps::new(1.0), ..Diag::ZERO });
     let mut ctrl = ControllerState::new();
 
     // Setpoint = [1, 0, 0], gyro = [0, 0, 0] → error = [1, 0, 0]
-    let sensors = make_sensors([0.0; 3], 12.0);
-    let setpoint = make_setpoint([1.0, 0.0, 0.0], 0.5);
+    let sensors = make_sensors([0.0; 3].map(RotPerSec::new), BATTERY);
+    let setpoint = make_setpoint([1.0, 0.0, 0.0].map(RotPerSec::new), 0.5);
 
     let _output = ctrl.update(&sensors, &setpoint, &gains);
 
@@ -160,12 +166,12 @@ fn proportional_error_generates_feedback() {
 
 #[test]
 fn opposite_error_reduces_duty() {
-    let gains = load_identity_gains(1.0, 0.0, 0.0, 0.0);
+    let gains = load_identity_gains(Diag { kp: VoltPerRps::new(1.0), ..Diag::ZERO });
     let mut ctrl = ControllerState::new();
 
     // Negative error: setpoint = [0,0,0], gyro = [1,0,0] → error = [-1,0,0]
-    let sensors = make_sensors([1.0, 0.0, 0.0], 12.0);
-    let setpoint = make_setpoint([0.0, 0.0, 0.0], 0.5);
+    let sensors = make_sensors([1.0, 0.0, 0.0].map(RotPerSec::new), BATTERY);
+    let setpoint = make_setpoint([0.0, 0.0, 0.0].map(RotPerSec::new), 0.5);
 
     let _output = ctrl.update(&sensors, &setpoint, &gains);
 
@@ -180,11 +186,11 @@ fn opposite_error_reduces_duty() {
 
 #[test]
 fn integrator_accumulates_over_iterations() {
-    let gains = load_identity_gains(0.0, 1.0, 0.0, 0.0);
+    let gains = load_identity_gains(Diag { ki: VoltPerRot::new(1.0), ..Diag::ZERO });
     let mut ctrl = ControllerState::new();
 
-    let sensors = make_sensors([0.0; 3], 12.0);
-    let setpoint = make_setpoint([1.0, 0.0, 0.0], 0.5);
+    let sensors = make_sensors([0.0; 3].map(RotPerSec::new), BATTERY);
+    let setpoint = make_setpoint([1.0, 0.0, 0.0].map(RotPerSec::new), 0.5);
 
     // Run several iterations to let the leaky integrator accumulate
     let mut prev_integral = Rotation::new(0.0);
@@ -209,11 +215,11 @@ fn integrator_accumulates_over_iterations() {
 
 #[test]
 fn integrator_clamps() {
-    let gains = load_identity_gains(0.0, 1.0, 0.0, 0.0);
+    let gains = load_identity_gains(Diag { ki: VoltPerRot::new(1.0), ..Diag::ZERO });
     let mut ctrl = ControllerState::new();
 
-    let sensors = make_sensors([0.0; 3], 12.0);
-    let setpoint = make_setpoint([100.0, 0.0, 0.0], 0.5); // huge error
+    let sensors = make_sensors([0.0; 3].map(RotPerSec::new), BATTERY);
+    let setpoint = make_setpoint([100.0, 0.0, 0.0].map(RotPerSec::new), 0.5); // huge error
 
     // Run many iterations — integrator should clamp at ±0.25 rot/s·dt
     for _ in 0..10000 {
@@ -231,11 +237,11 @@ fn integrator_clamps() {
 
 #[test]
 fn integral_voltage_bounded() {
-    let gains = load_identity_gains(0.0, 1e6, 0.0, 0.0);
+    let gains = load_identity_gains(Diag { ki: VoltPerRot::new(1e6), ..Diag::ZERO });
     let mut ctrl = ControllerState::new();
 
-    let sensors = make_sensors([0.0; 3], 12.0);
-    let setpoint = make_setpoint([1.0, 0.0, 0.0], 0.5);
+    let sensors = make_sensors([0.0; 3].map(RotPerSec::new), BATTERY);
+    let setpoint = make_setpoint([1.0, 0.0, 0.0].map(RotPerSec::new), 0.5);
     for _ in 0..10000 {
         ctrl.update(&sensors, &setpoint, &gains);
     }
@@ -248,16 +254,16 @@ fn integral_voltage_bounded() {
 
 #[test]
 fn derivative_responds_to_error_change() {
-    let gains = load_identity_gains(0.0, 0.0, 1.0, 0.0);
+    let gains = load_identity_gains(Diag { kd: VoltPerRpsPerSec::new(1.0), ..Diag::ZERO });
     let mut ctrl = ControllerState::new();
 
     // First iteration: setpoint=[0,0,0], gyro=[0,0,0] → error=[0,0,0]
-    let sensors = make_sensors([0.0; 3], 12.0);
-    let setpoint = make_setpoint([0.0, 0.0, 0.0], 0.5);
+    let sensors = make_sensors([0.0; 3].map(RotPerSec::new), BATTERY);
+    let setpoint = make_setpoint([0.0, 0.0, 0.0].map(RotPerSec::new), 0.5);
     ctrl.update(&sensors, &setpoint, &gains);
 
     // Second iteration: error jumps to [1,0,0] → derivative should be nonzero
-    let setpoint2 = make_setpoint([1.0, 0.0, 0.0], 0.5);
+    let setpoint2 = make_setpoint([1.0, 0.0, 0.0].map(RotPerSec::new), 0.5);
     ctrl.update(&sensors, &setpoint2, &gains);
 
     let deriv = ctrl.telemetry().error_derivative[0];
@@ -270,16 +276,16 @@ fn derivative_responds_to_error_change() {
 
 #[test]
 fn feedforward_responds_to_setpoint_change() {
-    let gains = load_identity_gains(0.0, 0.0, 0.0, 1.0);
+    let gains = load_identity_gains(Diag { binv: VoltPerRps::new(1.0), ..Diag::ZERO });
     let mut ctrl = ControllerState::new();
 
     // First iteration: setpoint=[0,0,0]
-    let sensors = make_sensors([0.0; 3], 12.0);
-    let setpoint0 = make_setpoint([0.0, 0.0, 0.0], 0.5);
+    let sensors = make_sensors([0.0; 3].map(RotPerSec::new), BATTERY);
+    let setpoint0 = make_setpoint([0.0, 0.0, 0.0].map(RotPerSec::new), 0.5);
     ctrl.update(&sensors, &setpoint0, &gains);
 
     // Second iteration: setpoint jumps to [1,0,0]
-    let setpoint1 = make_setpoint([1.0, 0.0, 0.0], 0.5);
+    let setpoint1 = make_setpoint([1.0, 0.0, 0.0].map(RotPerSec::new), 0.5);
     ctrl.update(&sensors, &setpoint1, &gains);
 
     let ff = ctrl.telemetry().feedforward_v[0];
@@ -292,12 +298,17 @@ fn feedforward_responds_to_setpoint_change() {
 
 #[test]
 fn reset_clears_state() {
-    let gains = load_identity_gains(1.0, 1.0, 1.0, 1.0);
+    let gains = load_identity_gains(Diag {
+        kp: VoltPerRps::new(1.0),
+        ki: VoltPerRot::new(1.0),
+        kd: VoltPerRpsPerSec::new(1.0),
+        binv: VoltPerRps::new(1.0),
+    });
     let mut ctrl = ControllerState::new();
 
     // Run several iterations to build up integrator/derivative state
-    let sensors = make_sensors([0.0; 3], 12.0);
-    let setpoint = make_setpoint([1.0, 0.5, 0.0], 0.5);
+    let sensors = make_sensors([0.0; 3].map(RotPerSec::new), BATTERY);
+    let setpoint = make_setpoint([1.0, 0.5, 0.0].map(RotPerSec::new), 0.5);
     for _ in 0..100 {
         ctrl.update(&sensors, &setpoint, &gains);
     }
@@ -310,7 +321,7 @@ fn reset_clears_state() {
     ctrl.reset();
 
     // Run one update with zero error to read telemetry
-    let sensors_match = make_sensors([1.0, 0.5, 0.0], 12.0);
+    let sensors_match = make_sensors([1.0, 0.5, 0.0].map(RotPerSec::new), BATTERY);
     ctrl.update(&sensors_match, &setpoint, &gains);
 
     // After reset, integral should be near zero (only one iter of accumulation)
@@ -323,13 +334,13 @@ fn reset_clears_state() {
 
 #[test]
 fn output_clamped_to_unit_interval() {
-    let gains = load_identity_gains(100.0, 0.0, 0.0, 0.0);
+    let gains = load_identity_gains(Diag { kp: VoltPerRps::new(100.0), ..Diag::ZERO });
     let mut ctrl = ControllerState::new();
 
     // Enormous error with huge Kp should produce enormous voltage,
     // but output duty should clamp to [0, 1]
-    let sensors = make_sensors([0.0; 3], 12.0);
-    let setpoint = make_setpoint([100.0, 100.0, 100.0], 1.0);
+    let sensors = make_sensors([0.0; 3].map(RotPerSec::new), BATTERY);
+    let setpoint = make_setpoint([100.0, 100.0, 100.0].map(RotPerSec::new), 1.0);
     let output = ctrl.update(&sensors, &setpoint, &gains);
 
     for i in 0..4 {
@@ -343,12 +354,12 @@ fn output_clamped_to_unit_interval() {
 
 #[test]
 fn low_battery_guard() {
-    let gains = load_identity_gains(1.0, 0.0, 0.0, 0.0);
+    let gains = load_identity_gains(Diag { kp: VoltPerRps::new(1.0), ..Diag::ZERO });
     let mut ctrl = ControllerState::new();
 
     // Battery voltage = 0 (should be guarded to 1.0 to prevent division by zero)
-    let sensors = make_sensors([0.0; 3], 0.0);
-    let setpoint = make_setpoint([1.0, 0.0, 0.0], 0.5);
+    let sensors = make_sensors([0.0; 3].map(RotPerSec::new), Volt::new(0.0));
+    let setpoint = make_setpoint([1.0, 0.0, 0.0].map(RotPerSec::new), 0.5);
     let output = ctrl.update(&sensors, &setpoint, &gains);
 
     // Should not panic or produce NaN/Inf
@@ -363,17 +374,17 @@ fn low_battery_guard() {
 
 #[test]
 fn throttle_maps_to_collective() {
-    let gains = load_identity_gains(0.0, 0.0, 0.0, 0.0);
+    let gains = load_identity_gains(Diag::ZERO);
     let mut ctrl = ControllerState::new();
 
     // All gains zero, zero error → output = pure throttle
-    let sensors = make_sensors([0.0; 3], 12.0);
+    let sensors = make_sensors([0.0; 3].map(RotPerSec::new), BATTERY);
 
-    let out_low = ctrl.update(&sensors, &make_setpoint([0.0; 3], 0.0), &gains);
+    let out_low = ctrl.update(&sensors, &make_setpoint([0.0; 3].map(RotPerSec::new), 0.0), &gains);
     ctrl.reset();
-    let out_mid = ctrl.update(&sensors, &make_setpoint([0.0; 3], 0.5), &gains);
+    let out_mid = ctrl.update(&sensors, &make_setpoint([0.0; 3].map(RotPerSec::new), 0.5), &gains);
     ctrl.reset();
-    let out_high = ctrl.update(&sensors, &make_setpoint([0.0; 3], 1.0), &gains);
+    let out_high = ctrl.update(&sensors, &make_setpoint([0.0; 3].map(RotPerSec::new), 1.0), &gains);
 
     assert!((out_low.motor_duty[0] - 0.00).abs() < 1e-4);
     assert!((out_mid.motor_duty[0] - 0.50).abs() < 1e-4);

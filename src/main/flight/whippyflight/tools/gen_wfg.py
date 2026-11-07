@@ -311,8 +311,8 @@ def build_thrust_balance(w):
 def build_airframe_drag(coeffs):
     """
     Airframe drag block [lp_hz, roll←accX, roll←accY, pitch←accX, pitch←accY]
-    from fit_model.py's drag terms: angular acceleration (rot/s² per g) from
-    the low-passed body x/y accelerometer.  The fit regresses BF gyro axes on
+    from fit_model.py's drag terms: angular acceleration per specific force
+    (rot/s² per m/s², i.e. rot/m) from the low-passed body x/y accelerometer.  The fit regresses BF gyro axes on
     BF accelerometer axes, so the coefficients go in as fitted.  All zero
     (mode off) unless the fit kept drag terms on some axis.
     """

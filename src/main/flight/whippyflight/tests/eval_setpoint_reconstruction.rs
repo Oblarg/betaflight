@@ -179,7 +179,7 @@ fn fly(gains: &GainStorage, axis: usize, stick: &dyn Fn(Time) -> Rate, dur: Time
             gyro_rps: plant.gyro_bf(),
             motor_rps: plant.motor_rps(),
             battery_voltage: battery_v(),
-            accel_g: [0.0; 3],
+            accel: [MetersPerSecSq::new(0.0); 3],
         };
         let out = match target {
             Some(tg) => {

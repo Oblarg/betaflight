@@ -294,6 +294,8 @@ typedef struct {
     double battery_voltage;             // V
 } fdm_packet_esc;
 
+// Stand-ins for the hardware getters, in the same units: getDshotErpm()
+// (eRPM/100) and getBatteryVoltage() (centivolts), unquantized.
 bool sitlHasEscTelemetry(void);
 float sitlGetMotorErpm(int motorIndex);
 float sitlGetBatteryVoltage(void);

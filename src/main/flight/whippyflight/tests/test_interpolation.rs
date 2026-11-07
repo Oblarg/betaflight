@@ -81,16 +81,12 @@ fn load_gradient_gains() -> GainStorage {
     storage
 }
 
-fn rps(v: f32) -> [RotPerSec; 4] {
-    [RotPerSec::new(v); 4]
-}
-
 #[test]
 fn interpolation_at_min_corner() {
     let storage = load_gradient_gains();
 
     // All motors at min_rps (100.0) → vertex (0,0,0,0)
-    let interp = interpolate_gains(&rps(100.0), &storage);
+    let interp = interpolate_gains(&[RotPerSec::new(100.0); 4], &storage);
 
     // At vertex (0,0,0,0): vertex_val = 0
     // kp (table_base=200.0): entry (0,0) = 200.0 + 0 + 0*0.01 + 0*0.001 = 200.0
@@ -107,7 +103,7 @@ fn interpolation_at_max_corner() {
     let storage = load_gradient_gains();
 
     // All motors at max_rps (200.0) → vertex (1,1,1,1)
-    let interp = interpolate_gains(&rps(200.0), &storage);
+    let interp = interpolate_gains(&[RotPerSec::new(200.0); 4], &storage);
 
     // vertex (1,1,1,1): vertex_val = 1 + 2 + 4 + 8 = 15
     // kp (base=200.0): entry (0,0) = 200.0 + 15 = 215.0
@@ -121,7 +117,7 @@ fn interpolation_at_midpoint() {
 
     // All motors at midpoint (150.0) → frac = [0.5, 0.5, 0.5, 0.5]
     // Result should be average of all 16 vertices
-    let interp = interpolate_gains(&rps(150.0), &storage);
+    let interp = interpolate_gains(&[RotPerSec::new(150.0); 4], &storage);
 
     // Average of vertex_val over all 16 vertices:
     // vertices have vals 0..15, average = 7.5
@@ -138,7 +134,7 @@ fn interpolation_clamps_below_min() {
     let storage = load_gradient_gains();
 
     // Motor speeds below min_rps should clamp to min corner
-    let interp = interpolate_gains(&rps(0.0), &storage);
+    let interp = interpolate_gains(&[RotPerSec::new(0.0); 4], &storage);
 
     // Should match vertex (0,0,0,0) — same as min corner test
     let kp = interp.kp.as_uniform().get(0, 0);
@@ -150,7 +146,7 @@ fn interpolation_clamps_above_max() {
     let storage = load_gradient_gains();
 
     // Motor speeds above max_rps should clamp to max corner
-    let interp = interpolate_gains(&rps(9999.0), &storage);
+    let interp = interpolate_gains(&[RotPerSec::new(9999.0); 4], &storage);
 
     // Should match vertex (1,1,1,1)
     let kp = interp.kp.as_uniform().get(0, 0);
@@ -161,7 +157,7 @@ fn interpolation_clamps_above_max() {
 fn interpolation_distinguishes_tables() {
     let storage = load_gradient_gains();
 
-    let interp = interpolate_gains(&rps(100.0), &storage); // min corner
+    let interp = interpolate_gains(&[RotPerSec::new(100.0); 4], &storage); // min corner
 
     // At vertex (0,0,0,0), entry (0,0):
     // ki (base=0):   0.0

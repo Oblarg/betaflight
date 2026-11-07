@@ -10,7 +10,7 @@ use common::units::{AngAccel, Rate, Time};
 use whippyflight_control::controller::ControllerState;
 use whippyflight_control::gains::{load_gains, GainStorage, MotorDrag};
 use whippyflight_control::types::*;
-use whippyunits::value;
+use whippyunits::{quantity, value};
 
 static TEST_WFG: &[u8] = include_bytes!("../tools/test_gains.wfg");
 
@@ -22,12 +22,12 @@ fn load() -> GainStorage {
 }
 
 /// Open-loop sensors: every motor at `speed` × the blob's hover speed.
-fn sensors(gains: &GainStorage, speed: f32, gyro: [RotPerSec; 3], accel_g: [f32; 3]) -> SensorData {
+fn sensors(gains: &GainStorage, speed: f32, gyro: [RotPerSec; 3], accel: [DecaMetersPerSecSq; 3]) -> SensorData {
     SensorData {
         gyro_rps: gyro,
         motor_rps: [speed * gains.hover_rps; 4],
         battery_voltage: model().battery_v(),
-        accel_g,
+        accel: accel.map(mps2),
     }
 }
 
@@ -65,8 +65,9 @@ fn run(ctrl: &mut ControllerState, gains: &GainStorage, s: &SensorData, duration
         .collect()
 }
 
-const ONE_G: [f32; 3] = [0.0, 0.0, 1.0];
-const NO_ACCEL: [f32; 3] = [0.0; 3];
+const ZERO_ACCEL: DecaMetersPerSecSq = quantity!(0.0, g_n, f32);
+const ONE_G: [DecaMetersPerSecSq; 3] = [ZERO_ACCEL, ZERO_ACCEL, STANDARD_GRAVITY];
+const NO_ACCEL: [DecaMetersPerSecSq; 3] = [ZERO_ACCEL; 3];
 
 fn growing(i: &[Rotation]) -> bool {
     *i.last().unwrap() > i[0] + Rotation::new(1e-12)
@@ -117,7 +118,7 @@ fn landing_stops_accumulation() {
 fn slow_motors_in_the_air_are_not_a_landing() {
     let gains = load();
     // Low thrust but falling (specific force ≪ 1 g), or tumbling: airborne.
-    for (gyro, accel) in [(STILL, [0.0, 0.0, 0.3]), (PITCHING, ONE_G), (PITCHING, NO_ACCEL)] {
+    for (gyro, accel) in [(STILL, [ZERO_ACCEL, ZERO_ACCEL, quantity!(0.3, g_n, f32)]), (PITCHING, ONE_G), (PITCHING, NO_ACCEL)] {
         let mut ctrl = ControllerState::new();
         run(&mut ctrl, &gains, &sensors(&gains, 1.0, STILL, NO_ACCEL), Seconds::new(0.2));
         let i = run(&mut ctrl, &gains, &sensors(&gains, 0.3, gyro, accel), Seconds::new(2.0));
@@ -161,7 +162,7 @@ fn fly(gains: &GainStorage, duration: Time, phase: impl Fn(Time) -> Phase) -> Ve
             gyro_rps: plant.gyro_bf(),
             motor_rps: plant.motor_rps(),
             battery_voltage: model().battery_v(),
-            accel_g: [0.0; 3],
+            accel: [MetersPerSecSq::new(0.0); 3],
         };
         let sp = SetpointData {
             rate_rps: [RotPerSec::new(0.0), p.stick, RotPerSec::new(0.0)],

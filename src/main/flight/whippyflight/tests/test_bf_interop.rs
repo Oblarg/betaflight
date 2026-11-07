@@ -1,8 +1,9 @@
 //! Tests for Betaflight interop: unit conversion, axis ordering, motor mapping.
 //!
-//! These tests simulate what the C glue layer does: take BF-native values
-//! (deg/s, centivolts, eRPM, DShot) and convert them to WhippyFlight units
-//! (rot/s, V, duty [0,1]) before calling the controller.
+//! The C glue hands BF-native values (deg/s, centivolts, eRPM/100) to the FFI
+//! as [`BfSensorData`]; these tests convert them the same way and check the
+//! controller sees the right rates, voltages and motor speeds, and that the
+//! telemetry going back ([`BfTelemetry`]) is in the units BF logs.
 
 mod common;
 
@@ -11,37 +12,26 @@ use whippyflight_control::controller::ControllerState;
 use whippyflight_control::gains::{GainStorage, load_gains};
 use whippyflight_control::types::*;
 use whippyunits::api::rescale_f32;
-use whippyunits::quantity;
+use whippyunits::value;
 
 // =========================================================================
-// Conversion helpers (mirror what the C glue layer does)
+// Conversion helpers
 // =========================================================================
 
-/// Simulate BF C glue: gyro.gyroADCf[] (deg/s, raw C floats) → SensorData.gyro_rps.
-fn bf_gyro_to_rps(dps: [f32; 3]) -> [RotPerSec; 3] {
-    [
-        dps[0] * BF_DPS_TO_RPS,
-        dps[1] * BF_DPS_TO_RPS,
-        dps[2] * BF_DPS_TO_RPS,
-    ]
+/// BF's readings as the glue passes them, converted as the FFI does.
+fn bf_sensors(gyro: [DegPerSec; 3], motor_erpm: [HundredErpm; 4], battery: CentiVolt) -> SensorData {
+    BfSensorData {
+        gyro,
+        motor_erpm,
+        battery,
+        accel_g: [0.0; 3],
+    }
+    .to_sensor_data()
 }
 
-/// Simulate BF C glue: getSetpointRate(axis) (deg/s) → SetpointData.rate_rps.
-fn bf_setpoint_to_rps(dps: [f32; 3]) -> [RotPerSec; 3] {
-    bf_gyro_to_rps(dps) // same conversion
-}
-
-/// Simulate BF C glue: getBatteryVoltage() (uint16 centivolts) → volts.
-fn bf_cv_to_volts(centivolts: u16) -> Volt {
-    centivolts as f32 * BF_CENTIVOLTS_TO_V
-}
-
-/// Simulate BF C glue: escSensorData[i].rpm (eRPM/100) → mechanical rot/s.
-///
-/// In BF: `erpmToRpm(erpm) = erpm * ERPM_PER_LSB / (motorPoleCount / 2)`.
-fn bf_erpm_to_rps(erpm_lsb: i16, pole_count: u8) -> RotPerSec {
-    let rpm = (erpm_lsb as f32) * BF_ERPM_LSB / (pole_count as f32 / 2.0);
-    rescale_f32(quantity!(rpm, rot / min, f32))
+/// `getRawSetpoint(axis)` (deg/s), converted as `whippyflight_setpoint_packet` does.
+fn bf_setpoint_to_rps(rate: [DegPerSec; 3]) -> [RotPerSec; 3] {
+    rate.map(rescale_f32)
 }
 
 /// Simulate BF C glue: motor duty [0,1] → DShot value.
@@ -106,6 +96,8 @@ fn load_test_gains() -> GainStorage {
     storage
 }
 
+/// eRPM/100 counts of a 200 rot/s (model unit) motor.
+const ERPM_200: [HundredErpm; 4] = [HundredErpm::new(1200.0); 4];
 const MOTORS_200: [RotPerSec; 4] = [RotPerSec::new(200.0); 4];
 
 // =========================================================================
@@ -115,7 +107,7 @@ const MOTORS_200: [RotPerSec; 4] = [RotPerSec::new(200.0); 4];
 #[test]
 fn bf_dps_to_rps_conversion() {
     // 360 deg/s = 1 rot/s
-    let rps = bf_gyro_to_rps([360.0, 180.0, 0.0]);
+    let rps = bf_sensors([360.0, 180.0, 0.0].map(DegPerSec::new), ERPM_200, CentiVolt::new(1680.0)).gyro_rps;
     let tol = RotPerSec::new(1e-6);
     assert!((rps[0] - RotPerSec::new(1.0)).abs() < tol, "360 dps should be 1 rps, got {:?}", rps[0]);
     assert!((rps[1] - RotPerSec::new(0.5)).abs() < tol, "180 dps should be 0.5 rps, got {:?}", rps[1]);
@@ -125,31 +117,109 @@ fn bf_dps_to_rps_conversion() {
 #[test]
 fn bf_centivolts_to_volts() {
     let tol = Volt::new(1e-4);
+    let volts = |cv: CentiVolt| bf_sensors([0.0; 3].map(DegPerSec::new), ERPM_200, cv).battery_voltage;
     // 1680 cV = 16.80 V (typical 4S battery)
-    let v = bf_cv_to_volts(1680);
-    assert!((v - Volt::new(16.80)).abs() < tol, "1680 cV should be 16.80 V, got {v:?}");
-
-    // 0 cV = 0.0 V
-    assert_eq!(bf_cv_to_volts(0), Volt::new(0.0));
-
+    assert!((volts(CentiVolt::new(1680.0)) - Volt::new(16.80)).abs() < tol, "1680 cV should be 16.80 V, got {:?}", volts(CentiVolt::new(1680.0)));
+    assert_eq!(volts(CentiVolt::new(0.0)), Volt::new(0.0));
     // 2520 cV = 25.20 V (6S battery)
-    let v6s = bf_cv_to_volts(2520);
-    assert!((v6s - Volt::new(25.20)).abs() < tol);
+    assert!((volts(CentiVolt::new(2520.0)) - Volt::new(25.20)).abs() < tol);
 }
 
 #[test]
-fn bf_erpm_to_rps_conversion() {
-    // Typical 14-pole motor (7 pole pairs)
-    // eRPM/100 = 350 → eRPM = 35000 → mech RPM = 35000 / 7 = 5000 → rot/s = 83.33
-    let rps = bf_erpm_to_rps(350, 14);
-    let expected = RotPerSec::new(350.0 * 100.0 / 7.0 / 60.0); // 83.333...
-    assert!(
-        (rps - expected).abs() < RotPerSec::new(0.01),
-        "eRPM/100=350 with 14 poles should be {expected:?}, got {rps:?}"
-    );
+fn bf_erpm_to_model_speed() {
+    // The regression's speed unit is the blackbox eRPM/100 field / 6.
+    let speed = bf_sensors([0.0; 3].map(DegPerSec::new), [350.0, 0.0, 1.0, 1200.0].map(HundredErpm::new), CentiVolt::new(1680.0)).motor_rps;
+    let tol = RotPerSec::new(1e-4);
+    assert!((speed[0] - RotPerSec::new(350.0 / 6.0)).abs() < tol, "got {:?}", speed[0]);
+    assert_eq!(speed[1], RotPerSec::new(0.0));
+    assert!((speed[2] - RotPerSec::new(1.0 / 6.0)).abs() < RotPerSec::new(1e-7), "got {:?}", speed[2]);
+    assert!((speed[3] - RotPerSec::new(200.0)).abs() < tol, "got {:?}", speed[3]);
+}
 
-    // Zero RPM
-    assert_eq!(bf_erpm_to_rps(0, 14), RotPerSec::new(0.0));
+/// A mechanical speed (dyn idle) and the eRPM telemetry of the same motor
+/// give the same model speed.
+#[test]
+fn mechanical_and_electrical_speeds_agree() {
+    // 14 poles: 5000 mechanical RPM = 35000 eRPM = 350 eRPM/100.
+    let mechanical = model_speed_from_mechanical(HundredRpm::new(50.0), 14);
+    let electrical = model_speed_from_erpm(HundredErpm::new(350.0));
+    assert!((mechanical - electrical).abs() < RotPerSec::new(1e-4), "{mechanical:?} vs {electrical:?}");
+    let erpm = erpm_from_mechanical(HundredRpm::new(50.0), 14);
+    assert_eq!(value!(erpm, 100 * rot / min, f32, Electrical), 350.0);
+}
+
+/// Telemetry leaves in the units BF logs it in: `pidData` floats per logged
+/// count, `debug[]` rounded and saturated to `int16_t`.
+#[test]
+fn bf_telemetry_encoding() {
+    let mut t = *ControllerState::new().telemetry();
+    t.error_prop = [RotPerSec::new(1.0), RotPerSec::new(-0.5), RotPerSec::new(0.001)];
+    t.error_integral = [Rotation::new(0.25); 3];
+    t.error_derivative = [RotPerSecSq::new(1.0); 3];
+    t.feedback_v = [Volt::new(1.25), Volt::new(-0.0004), Volt::new(40.0), Volt::new(f32::NAN)];
+    t.setpoint_rps = [RotPerSec::new(0.5); 3];
+    t.ff_target_rps = [RotPerSec::new(0.0001); 3];
+    t.feedforward_v[0] = Volt::new(3.456);
+    t.command_scale = 0.9876;
+    let bf = t.to_bf([RotPerSec::new(-1.0); 3]);
+
+    let close = |a: f32, b: f32| (a - b).abs() < 1e-3 * b.abs().max(1.0);
+    let p = bf.pid_p.map(|x| value!(x, 0.1 * deg / s, f32));
+    assert!(close(p[0], 3600.0) && close(p[1], -1800.0) && close(p[2], 3.6), "{p:?}");
+    assert!(close(value!(bf.pid_i[0], 0.1 * deg, f32), 900.0));
+    assert!(close(value!(bf.pid_d[0], deg / s ^ 2, f32), 360.0));
+
+    assert_eq!(bf.feedback.map(|v| value!(v, mV, i16)), [1250, 0, i16::MAX, 0]);
+    assert_eq!(value!(bf.raw_setpoint[0], 0.1 * deg / s, i16), -3600);
+    assert_eq!(value!(bf.setpoint[0], 0.1 * deg / s, i16), 1800);
+    assert_eq!(value!(bf.ff_target[0], 0.1 * deg / s, i16), 0);
+    assert_eq!(value!(bf.feedforward_motor0, cV, i16), 346);
+    assert_eq!(value!(bf.command_scale, 0.001, i16), 988);
+}
+
+/// `BfTelemetry` matches `wf_bf_telemetry_t` in whippyflight_glue.h.
+#[test]
+fn bf_telemetry_layout() {
+    use core::mem::{offset_of, size_of};
+    assert_eq!(offset_of!(BfTelemetry, pid_p), 0);
+    assert_eq!(offset_of!(BfTelemetry, pid_i), 12);
+    assert_eq!(offset_of!(BfTelemetry, pid_d), 24);
+    assert_eq!(offset_of!(BfTelemetry, feedback), 36);
+    assert_eq!(offset_of!(BfTelemetry, raw_setpoint), 44);
+    assert_eq!(offset_of!(BfTelemetry, setpoint), 50);
+    assert_eq!(offset_of!(BfTelemetry, ff_target), 56);
+    assert_eq!(offset_of!(BfTelemetry, feedforward_motor0), 62);
+    assert_eq!(offset_of!(BfTelemetry, command_scale), 64);
+    assert_eq!(size_of::<BfTelemetry>(), 68);
+}
+
+/// The glue's accelerometer reading is a count of g₀.
+#[test]
+fn bf_accel_g_to_mps2() {
+    let accel = BfSensorData {
+        gyro: [DegPerSec::new(0.0); 3],
+        motor_erpm: [HundredErpm::new(0.0); 4],
+        battery: CentiVolt::new(0.0),
+        accel_g: [0.0, -0.5, 1.0],
+    }
+    .to_sensor_data()
+    .accel
+    .map(|a| value!(a, m / s ^ 2, f32));
+    let expected = [0.0, -4.903325, 9.80665];
+    for (a, e) in accel.into_iter().zip(expected) {
+        assert!((a - e).abs() < 1e-5, "{accel:?}");
+    }
+}
+
+/// `BfSensorData` matches `wf_sensor_data_t` in whippyflight_glue.h.
+#[test]
+fn bf_sensor_data_layout() {
+    use core::mem::{offset_of, size_of};
+    assert_eq!(offset_of!(BfSensorData, gyro), 0);
+    assert_eq!(offset_of!(BfSensorData, motor_erpm), 12);
+    assert_eq!(offset_of!(BfSensorData, battery), 28);
+    assert_eq!(offset_of!(BfSensorData, accel_g), 32);
+    assert_eq!(size_of::<BfSensorData>(), 44);
 }
 
 #[test]
@@ -186,14 +256,9 @@ fn axis_order_roll_pitch_yaw() {
     // After conversion: setpoint_rps = [1.0, 0.0, 0.0]
     {
         let mut ctrl = ControllerState::new();
-        let sensors = SensorData {
-            gyro_rps: bf_gyro_to_rps([0.0, 0.0, 0.0]),
-            motor_rps: MOTORS_200,
-            battery_voltage: bf_cv_to_volts(1680),
-            accel_g: [0.0; 3],
-        };
+        let sensors = bf_sensors([0.0, 0.0, 0.0].map(DegPerSec::new), ERPM_200, CentiVolt::new(1680.0));
         let setpoint = SetpointData {
-            rate_rps: bf_setpoint_to_rps([360.0, 0.0, 0.0]),
+            rate_rps: bf_setpoint_to_rps([360.0, 0.0, 0.0].map(DegPerSec::new)),
             throttle: 0.5,
         };
         ctrl.update(&sensors, &setpoint, &gains);
@@ -218,14 +283,9 @@ fn axis_order_roll_pitch_yaw() {
     // BF: setpoint = [0, 360, 0] dps on PITCH (FD_PITCH=1)
     {
         let mut ctrl = ControllerState::new();
-        let sensors = SensorData {
-            gyro_rps: bf_gyro_to_rps([0.0, 0.0, 0.0]),
-            motor_rps: MOTORS_200,
-            battery_voltage: bf_cv_to_volts(1680),
-            accel_g: [0.0; 3],
-        };
+        let sensors = bf_sensors([0.0, 0.0, 0.0].map(DegPerSec::new), ERPM_200, CentiVolt::new(1680.0));
         let setpoint = SetpointData {
-            rate_rps: bf_setpoint_to_rps([0.0, 360.0, 0.0]),
+            rate_rps: bf_setpoint_to_rps([0.0, 360.0, 0.0].map(DegPerSec::new)),
             throttle: 0.5,
         };
         ctrl.update(&sensors, &setpoint, &gains);
@@ -240,14 +300,9 @@ fn axis_order_roll_pitch_yaw() {
     // BF: setpoint = [0, 0, 360] dps on YAW (FD_YAW=2)
     {
         let mut ctrl = ControllerState::new();
-        let sensors = SensorData {
-            gyro_rps: bf_gyro_to_rps([0.0, 0.0, 0.0]),
-            motor_rps: MOTORS_200,
-            battery_voltage: bf_cv_to_volts(1680),
-            accel_g: [0.0; 3],
-        };
+        let sensors = bf_sensors([0.0, 0.0, 0.0].map(DegPerSec::new), ERPM_200, CentiVolt::new(1680.0));
         let setpoint = SetpointData {
-            rate_rps: bf_setpoint_to_rps([0.0, 0.0, 360.0]),
+            rate_rps: bf_setpoint_to_rps([0.0, 0.0, 360.0].map(DegPerSec::new)),
             throttle: 0.5,
         };
         ctrl.update(&sensors, &setpoint, &gains);
@@ -278,7 +333,7 @@ fn motor_order_matches_bf_quadx() {
         gyro_rps: [RotPerSec::new(0.0); 3],
         motor_rps: MOTORS_200,
         battery_voltage: Volt::new(16.8),
-        accel_g: [0.0; 3],
+        accel: [MetersPerSecSq::new(0.0); 3],
     };
     let setpoint = SetpointData {
         rate_rps: [RotPerSec::new(1.0), RotPerSec::new(0.0), RotPerSec::new(0.0)], // roll error only
@@ -312,25 +367,18 @@ fn full_bf_round_trip() {
     // - Gyro: [2, -1, 0.5] deg/s  (near zero, slight drift)
     // - Setpoint: [0, 0, 0] deg/s (sticks centered)
     // - Battery: 1520 cV = 15.20V (3S discharged)
-    // - Motor eRPM: [300, 310, 295, 305] eRPM/100, 14-pole motor
+    // - Motor eRPM: [300, 310, 295, 305] eRPM/100
     // - Throttle: 0.45
 
-    let bf_gyro_dps = [2.0f32, -1.0, 0.5];
-    let bf_setpoint_dps = [0.0f32, 0.0, 0.0];
-    let bf_battery_cv: u16 = 1520;
-    let bf_motor_erpm: [i16; 4] = [300, 310, 295, 305];
-    let pole_count: u8 = 14;
+    let bf_gyro = [2.0, -1.0, 0.5].map(DegPerSec::new);
+    let bf_setpoint = [0.0, 0.0, 0.0].map(DegPerSec::new);
+    let bf_battery = CentiVolt::new(1520.0);
+    let bf_motor_erpm = [300.0, 310.0, 295.0, 305.0].map(HundredErpm::new);
     let bf_throttle: f32 = 0.45;
 
-    // Convert (what the C glue does)
-    let sensors = SensorData {
-        gyro_rps: bf_gyro_to_rps(bf_gyro_dps),
-        motor_rps: bf_motor_erpm.map(|erpm| bf_erpm_to_rps(erpm, pole_count)),
-        battery_voltage: bf_cv_to_volts(bf_battery_cv),
-        accel_g: [0.0; 3],
-    };
+    let sensors = bf_sensors(bf_gyro, bf_motor_erpm, bf_battery);
     let setpoint = SetpointData {
-        rate_rps: bf_setpoint_to_rps(bf_setpoint_dps),
+        rate_rps: bf_setpoint_to_rps(bf_setpoint),
         throttle: bf_throttle,
     };
 
@@ -372,14 +420,9 @@ fn negative_gyro_converts_correctly() {
 
     // BF: gyro = [-720, 0, 0] dps → -2 rot/s roll
     // BF: setpoint = [0, 0, 0] dps → error = 0 - (-2) = +2 rot/s
-    let sensors = SensorData {
-        gyro_rps: bf_gyro_to_rps([-720.0, 0.0, 0.0]),
-        motor_rps: MOTORS_200,
-        battery_voltage: bf_cv_to_volts(1680),
-        accel_g: [0.0; 3],
-    };
+    let sensors = bf_sensors([-720.0, 0.0, 0.0].map(DegPerSec::new), ERPM_200, CentiVolt::new(1680.0));
     let setpoint = SetpointData {
-        rate_rps: bf_setpoint_to_rps([0.0, 0.0, 0.0]),
+        rate_rps: bf_setpoint_to_rps([0.0, 0.0, 0.0].map(DegPerSec::new)),
         throttle: 0.5,
     };
     ctrl.update(&sensors, &setpoint, &gains);
@@ -390,17 +433,4 @@ fn negative_gyro_converts_correctly() {
         telem.error_prop[0] > RotPerSec::new(1.5),
         "roll error should be ~2.0 (correcting -2 rps spin), got {:?}", telem.error_prop[0]
     );
-}
-
-/// The glue's conversion constants agree with whippyunits' own unit scales.
-#[test]
-fn conversion_constant_sanity() {
-    let deg_per_sec: RotPerSec = rescale_f32(quantity!(1.0, deg / s, f32));
-    assert!((BF_DPS_TO_RPS - deg_per_sec).abs() < RotPerSec::new(1e-9));
-
-    let centivolt: Volt = rescale_f32(quantity!(1.0, cV, f32));
-    assert!((BF_CENTIVOLTS_TO_V - centivolt).abs() < Volt::new(1e-9));
-
-    // ERPM_PER_LSB = 100
-    assert!((BF_ERPM_LSB - 100.0).abs() < 1e-6);
 }

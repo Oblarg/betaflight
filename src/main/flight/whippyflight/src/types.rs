@@ -1,26 +1,28 @@
 //! Core types for the WhippyFlight control stack.
 //!
-//! All FFI-boundary types are `#[repr(C)]` so BF's C code can construct and
-//! read them directly.  Internal types use whippyunits quantities and
+//! FFI-boundary types are `#[repr(C)]` so BF's C code can construct and read
+//! them directly.  Internal types use whippyunits quantities and
 //! whippyalgebra matrices for compile-time dimensional safety.
 //!
 //! # Units
 //!
 //! The Rust layer uses clean SI-adjacent units throughout:
 //!
-//! | Quantity       | Rust unit    | BF native unit          |
-//! |----------------|-------------|-------------------------|
-//! | Angular rate   | rot/s       | deg/s                   |
-//! | Angle          | rot         | decidegrees             |
-//! | Voltage        | V (f32)     | centivolts (u16)        |
-//! | Motor speed    | rot/s       | eRPM/100 (i16)          |
-//! | Motor output   | duty [0,1]  | DShot 48–2047           |
-//! | Throttle       | [0, 1]      | [0, 1] (same)           |
+//! | Quantity       | Rust unit    | BF native unit                  |
+//! |----------------|-------------|---------------------------------|
+//! | Angular rate   | rot/s       | deg/s ([`DegPerSec`])           |
+//! | Voltage        | V (f32)     | centivolts ([`CentiVolt`])      |
+//! | Motor speed    | model rot/s | eRPM/100 ([`HundredErpm`]), RPM/100 ([`HundredRpm`]) |
+//! | RX rate        | period (s)  | Hz ([`Hertz`])                  |
+//! | Motor output   | duty [0,1]  | DShot 48–2047                   |
+//! | Throttle       | [0, 1]      | [0, 1] (same)                   |
+//! | Specific force | m/s²        | g₀ (`accADC / acc_1G`, a count of `g_n`) |
 //!
-//! Conversion from BF's native units to ours happens in the C glue layer
-//! that calls the Rust FFI functions.  See [`BF_DPS_TO_RPS`] and friends
-//! for the conversion constants (defined here so they can be exported via
-//! a C header).
+//! The FFI takes BF's values in BF's own units (see [`BfSensorData`]), typed,
+//! and hands telemetry back in the units BF logs it in ([`BfTelemetry`]), so
+//! the C glue copies values through unconverted and every conversion happens
+//! here.  Electrical and mechanical motor speeds carry different brands
+//! ([`Electrical`], [`Mechanical`]), and neither mixes with the model's.
 //!
 //! # Axis ordering
 //!
@@ -45,10 +47,10 @@
 //! (plain `float` arrays) even though every field is a typed quantity.
 //!
 //! Dimensionless values (duty, throttle, scales, ratios, filter
-//! coefficients) stay plain `f32`.  So does the accelerometer reading: it is
-//! specific force as a multiple of standard gravity g₀, a ratio, because
-//! g₀ = 9.80665 m/s² is not a power-of-2·3·5·π multiple of m/s² and so has
-//! no storage unit.
+//! coefficients) stay plain `f32`.  BF reads the accelerometer in standard
+//! gravities g₀; g₀ = 9.80665 m/s² is not a power-of-2·3·5·π multiple of
+//! m/s², so it is a non-storage unit (`g_n`, stored as 0.980665 dam/s²), and
+//! the reading is declared in it on the way in ([`accel_from_g`]).
 
 use whippyalgebra::dims;
 use whippyalgebra::nalgebra::{MixedUnitMatrix, UniformUnitMatrix};
@@ -56,35 +58,92 @@ use nalgebra::SMatrix;
 use nalgebra::{Const, Matrix, U1};
 use whippyalgebra::nalgebra::__backend::RawStorage;
 use whippyalgebra::{CollapseUniform, DimList, FromRaw, GaugeReproduces, Uniform};
-use whippyunits::{qty, DivUnit, Quantity, UnitDiv};
+use whippyunits::api::rescale_f32;
+use whippyunits::{qty, quantity, value, DivUnit, Quantity, UnitDiv};
+use bytemuck::TransparentWrapper;
 
 // Re-export for use in other modules
 pub use whippyalgebra::nalgebra as nalgebra;
 
 // ---------------------------------------------------------------------------
-// BF ↔ Rust conversion constants
+// BF-native units at the FFI boundary
 //
-// These are provided so the C glue layer (and unit tests) can convert from
-// Betaflight's native units to WhippyFlight's clean units.  Each is the
-// value of one BF count: multiply the BF value by it.
+// The C glue hands over BF's values as BF stores them; these types say what
+// unit that is, and the conversions below turn them into ours.
 // ---------------------------------------------------------------------------
 
-/// One BF gyro/setpoint count (1 deg/s), in rot/s.
-pub const BF_DPS_TO_RPS: RotPerSec = RotPerSec::new(1.0 / 360.0);
+/// BF's angular rate unit (`gyro.gyroADCf`, `getRawSetpoint`).
+pub type DegPerSec = qty!(deg / s, f32);
 
-/// One BF battery count (1 centivolt), in volts.
-pub const BF_CENTIVOLTS_TO_V: Volt = Volt::new(0.01);
+/// BF's battery voltage unit (`getBatteryVoltage()`).
+pub type CentiVolt = qty!(cV, f32);
 
-/// One BF eRPM/100 telemetry count, in eRPM.  Mechanical rot/s is
-/// `erpm_lsb * BF_ERPM_LSB * 2.0 / pole_count / 60.0`.
-pub const BF_ERPM_LSB: f32 = 100.0;
+/// Brand of an electrical motor speed: the commutation rate, pole pairs
+/// times the shaft's.
+#[derive(Clone, Copy)]
+pub struct Electrical;
 
-/// One BF eRPM/100 telemetry count, in model motor speed (eRPM/600).
-///
-/// The regression (main.R) defines motor speed as the blackbox eRPM field
-/// divided by 6, so all fitted coefficients and the gain grid are in this
-/// unit regardless of motor pole count.
-pub const BF_ERPM_LSB_TO_MODEL_RPS: RotPerSec = RotPerSec::new(1.0 / 6.0);
+/// Brand of a mechanical (shaft) motor speed.
+#[derive(Clone, Copy)]
+pub struct Mechanical;
+
+/// BF's DShot telemetry speed, eRPM/100 (`getDshotErpm`).
+pub type HundredErpm = qty!(100 * rot / min, f32, Electrical);
+
+/// BF's mechanical speed count, RPM/100 (`dyn_idle_min_rpm`).
+pub type HundredRpm = qty!(100 * rot / min, f32, Mechanical);
+
+/// Pole pairs of the motor whose mechanical rot/s is the model's motor speed
+/// unit.  The regression (main.R) defines motor speed as the blackbox eRPM/100
+/// field divided by 6, i.e. eRPM/600 = (electrical rot/s) / 10, whatever the
+/// actual pole count; the fitted coefficients and gain grid are in this unit.
+pub const MODEL_POLE_PAIRS: f32 = 10.0;
+
+/// Model motor speed from electrical (eRPM) telemetry.
+pub fn model_speed_from_erpm(erpm: HundredErpm) -> RotPerSec {
+    RotPerSec::new(value!(erpm, rot / s, f32, Electrical) / MODEL_POLE_PAIRS)
+}
+
+/// Electrical speed of a `pole_count`-pole motor turning at `rpm`.
+pub fn erpm_from_mechanical(rpm: HundredRpm, pole_count: u8) -> HundredErpm {
+    HundredErpm::new(value!(rpm, 100 * rot / min, f32, Mechanical) * (pole_count as f32 / 2.0))
+}
+
+/// Model motor speed from a mechanical speed on a `pole_count`-pole motor.
+pub fn model_speed_from_mechanical(rpm: HundredRpm, pole_count: u8) -> RotPerSec {
+    model_speed_from_erpm(erpm_from_mechanical(rpm, pole_count))
+}
+
+// ---------------------------------------------------------------------------
+// BF-native units of the telemetry going back out
+//
+// Blackbox logs `pidData[axis]` as `lrintf` of the float, so those fields
+// are floats in the unit of one logged LSB.  `debug[]` is `int16_t`, so the
+// debug fields are rounded here ([`to_debug`]); build/debug.h annotates each
+// with the same `[unit:…]`.
+// ---------------------------------------------------------------------------
+
+/// `pidData` P (rate error): 0.1 deg/s per logged count.
+pub type DeciDegPerSec = qty!(0.1 * deg / s, f32);
+/// `pidData` I (integrated rate error): 0.1 deg per logged count.
+pub type DeciDeg = qty!(0.1 * deg, f32);
+/// `pidData` D (filtered rate-error derivative): 1 deg/s² per logged count.
+pub type DegPerSecSq = qty!(deg / s ^ 2, f32);
+
+/// `debug[]` rate, `[unit:0.1dps]`.
+pub type DebugDeciDps = qty!(0.1 * deg / s, i16);
+/// `debug[]` voltage, `[unit:0.001V]`.
+pub type DebugMilliVolt = qty!(mV, i16);
+/// `debug[]` voltage, `[unit:0.01V]`.
+pub type DebugCentiVolt = qty!(cV, i16);
+/// `debug[]` ratio, `[unit:0.001]`.
+pub type DebugPermille = qty!(0.001, i16);
+
+/// Round to the nearest LSB of an `int16_t` debug field, saturating; NaN
+/// logs as 0.  The unit is unchanged, only the storage.
+pub fn to_debug<U, B>(q: Quantity<U, f32, B>) -> Quantity<U, i16, B> {
+    Quantity::wrap(libm::roundf(Quantity::peel(q)) as i16)
+}
 
 // ---------------------------------------------------------------------------
 // Dimension lists
@@ -200,6 +259,25 @@ pub type VoltPerRot = qty!(V / rot, f32);
 pub type VoltPerRpsPerSec = qty!(V * s ^ 2 / rot, f32);
 /// Rotation rate per volt over one tick, rot/(s·V) (the reference model's Bd).
 pub type RpsPerVolt = qty!(rot / s / V, f32);
+/// Specific force (what an accelerometer measures) in m/s².
+pub type MetersPerSecSq = qty!(m / s ^ 2, f32);
+/// What a `g_n` declaration stores: 1 g₀ is 0.980665 dam/s².
+pub type DecaMetersPerSecSq = qty!(dam / s ^ 2, f32);
+/// Angular acceleration per specific force, rot/m (airframe drag).
+pub type RotPerMeter = qty!(rot / m, f32);
+
+/// Standard gravity g₀.
+pub const STANDARD_GRAVITY: DecaMetersPerSecSq = quantity!(1.0, g_n, f32);
+
+/// m/s² of a quantity declared in g₀.
+pub fn mps2(a: DecaMetersPerSecSq) -> MetersPerSecSq {
+    rescale_f32(a)
+}
+
+/// Specific force from an accelerometer reading in g₀.
+pub fn accel_from_g(g: f32) -> MetersPerSecSq {
+    mps2(quantity!(g, g_n, f32))
+}
 
 // ---------------------------------------------------------------------------
 // Vector ↔ array conversion
@@ -237,60 +315,69 @@ where
 }
 
 // ---------------------------------------------------------------------------
-// FFI-boundary types (C-compatible)
+// Controller I/O; the `#[repr(C)]` ones cross the FFI
 // ---------------------------------------------------------------------------
 
-/// Sensor data passed from BF to the Rust control stack every loop iteration.
-///
-/// **All values must be in WhippyFlight units (rot/s, V) — NOT BF native
-/// units.**  The C glue layer is responsible for converting from BF's
-/// deg/s, centivolts, eRPM etc. before filling this struct.
+/// Sensor data as BF hands it over every loop iteration, in BF's units.
 ///
 /// Axis order: `[roll, pitch, yaw]` (matches BF's `FD_ROLL=0, FD_PITCH=1, FD_YAW=2`).
 /// Motor order: `[REAR_R, FRONT_R, REAR_L, FRONT_L]` (matches BF's QUADX mixer).
 #[repr(C)]
 #[derive(Clone, Copy)]
 #[cfg_attr(feature = "std", derive(Debug))]
-pub struct SensorData {
-    /// Gyro rates in rot/s: [roll, pitch, yaw].
-    ///
-    /// C glue converts from BF's `gyro.gyroADCf[axis]` (deg/s):
-    /// `gyro_rps[i] = gyro.gyroADCf[i] * BF_DPS_TO_RPS`
-    pub gyro_rps: [RotPerSec; 3],
-    /// Motor speeds in the regression's speed unit (eRPM/600), by BF motor
-    /// index.  This equals mechanical rot/s only for 20-pole motors.
-    ///
-    /// C glue converts from BF's DShot eRPM telemetry (eRPM/100 per LSB):
-    /// `motor_rps[i] = getDshotErpm(i) * BF_ERPM_LSB_TO_MODEL_RPS`
-    pub motor_rps: [RotPerSec; 4],
-    /// Battery voltage in volts.
-    ///
-    /// C glue converts from BF's `getBatteryVoltage()` (centivolts):
-    /// `battery_voltage = getBatteryVoltage() * BF_CENTIVOLTS_TO_V`
-    pub battery_voltage: Volt,
-    /// Body-frame specific force in g₀ (a ratio, see the module docs):
-    /// [x, y, z] (BF accelerometer axes).
-    /// Only read by the airframe drag mode; zero without an accelerometer.
-    ///
-    /// C glue converts from BF's aligned `acc.accADC[axis]` (LSB):
-    /// `accel_g[i] = acc.accADC[i] / acc.dev.acc_1G`
+pub struct BfSensorData {
+    /// `gyro.gyroADCf[axis]`: [roll, pitch, yaw].
+    pub gyro: [DegPerSec; 3],
+    /// `getDshotErpm(motor)`, electrical, by BF motor index.
+    pub motor_erpm: [HundredErpm; 4],
+    /// `getBatteryVoltage()`.
+    pub battery: CentiVolt,
+    /// Body-frame specific force, a count of g₀ (`g_n`, see the module
+    /// docs): [x, y, z] (BF accelerometer axes), `acc.accADC[i] /
+    /// acc.dev.acc_1G`.  Zero without an accelerometer.
     pub accel_g: [f32; 3],
+}
+
+impl BfSensorData {
+    /// The same readings in WhippyFlight's units.
+    pub fn to_sensor_data(&self) -> SensorData {
+        SensorData {
+            gyro_rps: self.gyro.map(rescale_f32),
+            motor_rps: self.motor_erpm.map(model_speed_from_erpm),
+            battery_voltage: rescale_f32(self.battery),
+            accel: self.accel_g.map(accel_from_g),
+        }
+    }
+}
+
+/// Sensor data in WhippyFlight's units, as the controller consumes it.
+///
+/// Axis order: `[roll, pitch, yaw]`; motor order: `[REAR_R, FRONT_R, REAR_L,
+/// FRONT_L]` (see [`BfSensorData`]).
+#[derive(Clone, Copy)]
+#[cfg_attr(feature = "std", derive(Debug))]
+pub struct SensorData {
+    /// Gyro rates: [roll, pitch, yaw].
+    pub gyro_rps: [RotPerSec; 3],
+    /// Motor speeds in the model's unit (see [`MODEL_POLE_PAIRS`]), by BF
+    /// motor index.
+    pub motor_rps: [RotPerSec; 4],
+    /// Battery voltage.
+    pub battery_voltage: Volt,
+    /// Body-frame specific force: [x, y, z] (BF accelerometer axes).
+    pub accel: [MetersPerSecSq; 3],
 }
 
 /// Per-tick setpoint for [`crate::controller::ControllerState`].
 ///
-/// **All values must be in WhippyFlight units — NOT BF native units.**
-///
 /// Axis order: `[roll, pitch, yaw]`.
-#[repr(C)]
 #[derive(Clone, Copy)]
 #[cfg_attr(feature = "std", derive(Debug))]
 pub struct SetpointData {
     /// Desired attitude rates in rot/s: [roll, pitch, yaw].
     ///
     /// On the firmware path this is the [`crate::setpoint`] estimate r(t),
-    /// built from BF's raw setpoint packets (`getRawSetpoint(axis)` deg/s
-    /// × `BF_DPS_TO_RPS`).
+    /// built from BF's raw setpoint packets.
     pub rate_rps: [RotPerSec; 3],
     /// Throttle as a fraction [0, 1].
     ///
@@ -312,11 +399,11 @@ pub struct ControlOutput {
     pub motor_duty: [f32; 4],
 }
 
-/// Telemetry data for blackbox logging.
+/// The controller's internal state for one tick, in WhippyFlight's units.
+/// [`LqrTelemetry::to_bf`] encodes what BF logs of it.
 ///
 /// Axis order: `[roll, pitch, yaw]`.
 /// Motor order: `[REAR_R, FRONT_R, REAR_L, FRONT_L]`.
-#[repr(C)]
 #[derive(Clone, Copy)]
 #[cfg_attr(feature = "std", derive(Debug))]
 pub struct LqrTelemetry {
@@ -344,6 +431,53 @@ pub struct LqrTelemetry {
     pub ff_target_rps: [RotPerSec; 3],
     /// Status: 0 = no gains, 1 = gains loaded, 2 = gains corrupt.
     pub status: u8,
+}
+
+impl LqrTelemetry {
+    /// The logged fields, encoded in BF's units; `raw_setpoint` is the last
+    /// RX packet's rate setpoint.
+    pub fn to_bf(&self, raw_setpoint: [RotPerSec; 3]) -> BfTelemetry {
+        let debug_rate = |r: RotPerSec| -> DebugDeciDps { to_debug(rescale_f32(r)) };
+        BfTelemetry {
+            pid_p: self.error_prop.map(rescale_f32),
+            pid_i: self.error_integral.map(rescale_f32),
+            pid_d: self.error_derivative.map(rescale_f32),
+            feedback: self.feedback_v.map(|v| to_debug(rescale_f32(v))),
+            raw_setpoint: raw_setpoint.map(debug_rate),
+            setpoint: self.setpoint_rps.map(debug_rate),
+            ff_target: self.ff_target_rps.map(debug_rate),
+            feedforward_motor0: to_debug(rescale_f32(self.feedforward_v[0])),
+            command_scale: to_debug(rescale_f32(<qty!(1, f32)>::new(self.command_scale))),
+        }
+    }
+}
+
+/// What BF logs of [`LqrTelemetry`], in the units it logs it in; the C glue
+/// copies each field into its blackbox or debug slot unconverted.
+///
+/// Axis order: `[roll, pitch, yaw]`.
+/// Motor order: `[REAR_R, FRONT_R, REAR_L, FRONT_L]`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+#[cfg_attr(feature = "std", derive(Debug))]
+pub struct BfTelemetry {
+    /// `pidData[axis].P` and `.Sum`: rate error.
+    pub pid_p: [DeciDegPerSec; 3],
+    /// `pidData[axis].I`: integral of the rate error.
+    pub pid_i: [DeciDeg; 3],
+    /// `pidData[axis].D`: filtered derivative of the rate error.
+    pub pid_d: [DegPerSecSq; 3],
+    /// `DEBUG_NONE` 0–3: per-motor feedback voltage.
+    pub feedback: [DebugMilliVolt; 4],
+    /// `DEBUG_WHIPPYFLIGHT`: the raw RX setpoint, the estimate the controller
+    /// tracked, and the feedforward target.
+    pub raw_setpoint: [DebugDeciDps; 3],
+    pub setpoint: [DebugDeciDps; 3],
+    pub ff_target: [DebugDeciDps; 3],
+    /// `DEBUG_WHIPPYFLIGHT`: motor 0 feedforward voltage.
+    pub feedforward_motor0: DebugCentiVolt,
+    /// `DEBUG_WHIPPYFLIGHT`: allocator attitude command scale.
+    pub command_scale: DebugPermille,
 }
 
 /// Result of gain loading.

@@ -17,6 +17,10 @@ pub type TimeSq = qty!(s ^ 2);
 pub type Millis = qty!(ms);
 pub type Angle = qty!(rot);
 pub type Freq = qty!(Hz);
+/// Specific force, m/s².
+pub type Accel = qty!(m / s ^ 2);
+/// Airframe drag, rot/s² per m/s².
+pub type PerMeter = qty!(rot / m);
 /// Rate damping, rot/s² per rot/s.
 pub type PerTime = qty!(1 / s);
 /// Torque per signed squared speed, rot/s² per rot²/s².

@@ -33,16 +33,12 @@ const HOVER_RPS: RotPerSec = RotPerSec::new(275.0);
 const FULL: Volt = Volt::new(16.8);
 const ZERO_V: Volt = Volt::new(0.0);
 
-fn rates(r: [f32; 3]) -> [RotPerSec; 3] {
-    r.map(RotPerSec::new)
-}
-
 fn make_hover_sensors(battery_v: Volt) -> SensorData {
     SensorData {
-        gyro_rps: rates([0.0, 0.0, 0.0]), // [roll, pitch, yaw] — no rotation
+        gyro_rps: [0.0, 0.0, 0.0].map(RotPerSec::new), // [roll, pitch, yaw] — no rotation
         motor_rps: [HOVER_RPS; 4],        // mid-range hover
         battery_voltage: battery_v,
-        accel_g: [0.0; 3],
+        accel: [MetersPerSecSq::new(0.0); 3],
     }
 }
 
@@ -60,7 +56,7 @@ fn between(x: f32, a: f32, b: f32) -> bool {
 
 fn make_hover_setpoint() -> SetpointData {
     SetpointData {
-        rate_rps: rates([0.0, 0.0, 0.0]),
+        rate_rps: [0.0, 0.0, 0.0].map(RotPerSec::new),
         throttle: 0.5,
     }
 }
@@ -162,7 +158,7 @@ fn pitch_disturbance_produces_differential_response() {
     // Inject positive pitch rate disturbance (nose up)
     // gyro reads positive pitch rate, but setpoint is zero → negative error
     let disturbed = SensorData {
-        gyro_rps: rates([0.0, 0.5, 0.0]),  // [roll=0, pitch=+0.5 rot/s, yaw=0]
+        gyro_rps: [0.0, 0.5, 0.0].map(RotPerSec::new),  // [roll=0, pitch=+0.5 rot/s, yaw=0]
         ..hover_sensors
     };
 
@@ -204,7 +200,7 @@ fn roll_disturbance_produces_differential_response() {
 
     // Inject positive roll disturbance
     let disturbed = SensorData {
-        gyro_rps: rates([0.5, 0.0, 0.0]),  // [roll=+0.5 rot/s, pitch=0, yaw=0]
+        gyro_rps: [0.5, 0.0, 0.0].map(RotPerSec::new),  // [roll=+0.5 rot/s, pitch=0, yaw=0]
         ..hover_sensors
     };
 
@@ -243,7 +239,7 @@ fn yaw_disturbance_produces_diagonal_response() {
 
     // Inject yaw disturbance
     let disturbed = SensorData {
-        gyro_rps: rates([0.0, 0.0, 0.5]),  // [roll=0, pitch=0, yaw=+0.5 rot/s]
+        gyro_rps: [0.0, 0.0, 0.5].map(RotPerSec::new),  // [roll=0, pitch=0, yaw=+0.5 rot/s]
         ..hover_sensors
     };
 
@@ -278,7 +274,7 @@ fn integral_accumulates_under_sustained_error() {
     // Small sustained roll command — gyro reads zero, so error persists.
     let sensors = make_hover_sensors(FULL);
     let setpoint = SetpointData {
-        rate_rps: rates([0.02, 0.0, 0.0]),
+        rate_rps: [0.02, 0.0, 0.0].map(RotPerSec::new),
         throttle: 0.5,
     };
 
@@ -329,7 +325,7 @@ fn lower_battery_increases_duty_for_same_correction() {
     let setpoint = make_hover_setpoint();
     let correction_spread = |battery_v: Volt| {
         let sensors = make_hover_sensors(battery_v);
-        let disturbed = SensorData { gyro_rps: rates([0.0, 0.01, 0.0]), ..sensors };
+        let disturbed = SensorData { gyro_rps: [0.0, 0.01, 0.0].map(RotPerSec::new), ..sensors };
         let mut ctrl = ControllerState::new();
         for _ in 0..50 {
             ctrl.update(&sensors, &setpoint, &gains);
@@ -586,7 +582,7 @@ fn reference_model_predicts_the_plant() {
             let (rate, target) = est.tick(now_us, dt.lossy_into());
             let sp = SetpointData { rate_rps: rate, throttle: model().throttle_at(1.0) };
             let s = SensorData { gyro_rps: plant.gyro_bf(), motor_rps: plant.motor_rps(),
-                                 battery_voltage: model().battery_v(), accel_g: [0.0; 3] };
+                                 battery_voltage: model().battery_v(), accel: [MetersPerSecSq::new(0.0); 3] };
             let volts = duty_volts(ctrl.update_with_target(&s, &sp, target, &gains).motor_duty);
             assert_eq!(ctrl.telemetry().command_scale, 1.0, "saturated at {t:?}");
             for _ in 0..4 {
@@ -608,7 +604,7 @@ fn reference_model_seeds_without_kick() {
     let gains = load_test_gains();
     let mut ctrl = ControllerState::new();
     let mut sp = make_hover_setpoint();
-    sp.rate_rps = rates([0.5, -0.3, 0.2]);
+    sp.rate_rps = [0.5, -0.3, 0.2].map(RotPerSec::new);
     ctrl.update(&make_hover_sensors(FULL), &sp, &gains);
     let ff = ctrl.telemetry().feedforward_v;
     // Only the steady hold term for the seeded rate (no step response).

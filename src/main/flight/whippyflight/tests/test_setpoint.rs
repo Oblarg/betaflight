@@ -19,9 +19,8 @@ fn roll(rate: RotPerSec) -> [RotPerSec; 3] {
     [rate, ZERO, ZERO]
 }
 
-fn limits(slew: f32, jerk: f32) -> (RotPerSecSq, RotPerSecCu) {
-    (RotPerSecSq::new(slew), RotPerSecCu::new(jerk))
-}
+/// No slew limit and the jerk limit off (zero): the target is the estimate.
+const UNLIMITED: (RotPerSecSq, RotPerSecCu) = (RotPerSecSq::new(1e9), RotPerSecCu::new(0.0));
 
 /// Feed `packets` of `stick(t)` on roll and tick through them; returns the
 /// last (rate, target) and the largest per-tick target change.
@@ -62,7 +61,7 @@ fn kalata_gains_match_closed_form() {
 fn tracks_a_ramp_without_projecting_it() {
     let mut est = SetpointEstimator::new();
     // The jerk limit trails a ramp by slope²/(2J); this checks the estimate.
-    let (slew, jerk) = limits(1e9, 0.0);
+    let (slew, jerk) = UNLIMITED;
     est.configure(8.0, slew, jerk);
     let slope = RotPerSecSq::new(10.0);
     let (rate, target, _) = run(&mut est, |t| slope * t, 200);
@@ -76,7 +75,7 @@ fn tracks_a_ramp_without_projecting_it() {
 /// horizon ahead made the 18 deg/s, 10 ms flick's +35%.
 #[test]
 fn flick_target_does_not_overshoot() {
-    let (slew, jerk) = limits(127.0, 2315.0);
+    let (slew, jerk) = (RotPerSecSq::new(127.0), RotPerSecCu::new(2315.0));
     for (amp, rise, bound) in [(0.05f32, 0.010f32, 1.06f32), (0.2, 0.030, 1.015), (1.0, 0.010, 1.015)] {
         let (amp, rise) = (RotPerSec::new(amp), Seconds::new(rise));
         let mut est = SetpointEstimator::new();
@@ -100,7 +99,7 @@ fn flick_target_does_not_overshoot() {
 #[test]
 fn target_slew_is_limited() {
     let mut est = SetpointEstimator::new();
-    let (slew, jerk) = limits(100.0, 0.0);
+    let (slew, jerk) = (RotPerSecSq::new(100.0), RotPerSecCu::new(0.0));
     est.configure(8.0, slew, jerk);
     run(&mut est, |_| ZERO, 10);
     let (_, target, max_step) = run(&mut est, |_| RotPerSec::new(1.0), 1);
@@ -113,7 +112,7 @@ fn target_slew_is_limited() {
 /// onto the goal, so the bound is checked away from it).
 #[test]
 fn target_jerk_is_limited_and_lands_without_overshoot() {
-    let (slew, jerk) = limits(100.0, 5000.0);
+    let (slew, jerk) = (RotPerSecSq::new(100.0), RotPerSecCu::new(5000.0));
     let mut est = SetpointEstimator::new();
     est.configure(8.0, slew, jerk);
     run(&mut est, |_| ZERO, 10);
@@ -147,7 +146,7 @@ fn target_jerk_is_limited_and_lands_without_overshoot() {
 #[test]
 fn holds_without_extrapolating_after_link_loss() {
     let mut est = SetpointEstimator::new();
-    let (slew, jerk) = limits(1e9, 0.0);
+    let (slew, jerk) = UNLIMITED;
     est.configure(8.0, slew, jerk);
     let ramp = RotPerSecSq::new(10.0);
     run(&mut est, |t| ramp * t, 50);
@@ -175,7 +174,7 @@ fn lambda_is_rescaled_with_link_period() {
     // At 250 Hz, λ_500 = 8 must act as λ = 32: one step of size 1 should be
     // absorbed with α(32).
     let mut est = SetpointEstimator::new();
-    let (slew, jerk) = limits(1e9, 0.0);
+    let (slew, jerk) = UNLIMITED;
     est.configure(8.0, slew, jerk);
     let period = Seconds::new(0.004);
     est.packet([ZERO; 3], Micros::new(0), period);
@@ -199,7 +198,7 @@ fn quantized_ramp_is_followed() {
     let per_us = RotPerSec::new(216.0 / 300.0 / 360.0); // per µs of stick
     let ramp_time = Seconds::new(0.8);
     for (slew, jerk) in [(127.0, 2315.0), (154.0, 3853.0), (100.0, 5000.0)] {
-        let (slew, jerk) = limits(slew, jerk);
+        let (slew, jerk) = (RotPerSecSq::new(slew), RotPerSecCu::new(jerk));
         let mut est = SetpointEstimator::new();
         est.configure(8.0, slew, jerk);
         let (mut sum, mut n) = (ZERO, 0);

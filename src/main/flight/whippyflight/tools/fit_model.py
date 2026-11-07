@@ -89,7 +89,8 @@ MIN_MOTOR_ERPM_CORR = 0.6
 # torques pitch and roll.  In flight the accelerometer reads thrust (body z)
 # plus drag, so its x/y components measure the drag force directly; the fit
 # adds them, one-pole low-passed at DRAG_LP_HZ (the firmware's filter), as
-# regressors on pitch and roll.  --drag auto keeps them on an axis only if
+# regressors on pitch and roll, in m/s² so the coefficients are rot/m, the
+# blob's unit.  --drag auto keeps them on an axis only if
 # they improve its held-out R² by DRAG_MIN_GAIN and the axis then reaches
 # DRAG_MIN_HELDOUT_R2 (below that the model doesn't predict the axis at all,
 # and the gain is noise).
@@ -98,6 +99,7 @@ DRAG_MIN_GAIN = 0.02
 DRAG_MIN_HELDOUT_R2 = 0.3
 DRAG_FOLDS = 4
 DRAG_TERMS = ["accX", "accY"]
+STANDARD_GRAVITY = 9.80665
 
 DSHOT_MIN = 48
 DSHOT_MAX = 2047
@@ -194,14 +196,14 @@ class Flight:
         return "accSmooth[0]" in self.cols
 
     def accel_lp(self):
-        """Body x/y specific force in g, one-pole low-passed at DRAG_LP_HZ (causal, as on the FC)."""
+        """Body x/y specific force in m/s², one-pole low-passed at DRAG_LP_HZ (causal, as on the FC)."""
         if getattr(self, "_accel_lp", None) is None or len(self._accel_lp[0]) != len(self.t):
             one_g = float(self.header.get("acc_1G", 2048))
             k = 1.0 - np.exp(-2.0 * np.pi * DRAG_LP_HZ / self.log_hz)
             from scipy.signal import lfilter
             out = []
             for i in range(2):
-                a = self.cols[f"accSmooth[{i}]"] / one_g
+                a = STANDARD_GRAVITY * self.cols[f"accSmooth[{i}]"] / one_g
                 out.append(lfilter([k], [1.0, k - 1.0], a, zi=[(1.0 - k) * a[0]])[0])
             self._accel_lp = out
         return self._accel_lp
@@ -363,7 +365,7 @@ def design_split(flight, axis, drag=False):
     """
     Pitch/roll rows with the two motor pairs as separate regressors:
     columns [rate, Σω²(positive pair), Σω²(negative pair)], then with `drag`
-    the low-passed body x/y specific force (g).
+    the low-passed body x/y specific force (m/s²).
     """
     n = flight.window(axis)
     t = flight.t

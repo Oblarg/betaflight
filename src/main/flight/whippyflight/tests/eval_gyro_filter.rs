@@ -281,7 +281,7 @@ fn fly_inner_with(gains: &GainStorage, amp: Rate, kick: Rate, settle: Time, mut 
             (0..3).for_each(|a| gyro[a] = gyro[a] + s.gyro[a]);
             (0..4).for_each(|m| motor_rps[m] = motor_rps[m] + s.motor[m]);
         }
-        let sensors = SensorData { gyro_rps: gyro, motor_rps, battery_voltage: battery_v(), accel_g: [0.0; 3] };
+        let sensors = SensorData { gyro_rps: gyro, motor_rps, battery_voltage: battery_v(), accel: [MetersPerSecSq::new(0.0); 3] };
         let out = ctrl.update_with_target(&sensors, &SetpointData { rate_rps: rate, throttle: throttle() },
                                           target, gains);
         volts = duty_volts(out.motor_duty);

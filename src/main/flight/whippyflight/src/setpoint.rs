@@ -70,6 +70,8 @@ pub struct SetpointEstimator {
     x: [RotPerSec; 3],
     v: [RotPerSecSq; 3],
     packet_us: Micros,
+    /// The last packet's rate, as received.
+    raw: [RotPerSec; 3],
     seeded: bool,
     target: [RotPerSec; 3],
     target_valid: bool,
@@ -89,6 +91,7 @@ impl SetpointEstimator {
             x: [RotPerSec::new(0.0); 3],
             v: [RotPerSecSq::new(0.0); 3],
             packet_us: Micros::new(0),
+            raw: [RotPerSec::new(0.0); 3],
             seeded: false,
             target: [RotPerSec::new(0.0); 3],
             target_valid: false,
@@ -115,6 +118,7 @@ impl SetpointEstimator {
     /// A new RX packet: raw (unsmoothed) setpoint [roll, pitch, yaw], its
     /// arrival time, and the current RX period estimate.
     pub fn packet(&mut self, rate: [RotPerSec; 3], time: Micros, rx_period: Seconds) {
+        self.raw = rate;
         if rx_period <= Seconds::new(0.0) {
             return;
         }
@@ -136,6 +140,11 @@ impl SetpointEstimator {
             }
         }
         self.packet_us = time;
+    }
+
+    /// The last packet's rate setpoint, as received.
+    pub fn raw(&self) -> [RotPerSec; 3] {
+        self.raw
     }
 
     /// Per-tick setpoint r(t) and slew/jerk-limited feedforward target.

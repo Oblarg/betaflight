@@ -588,8 +588,8 @@ static void updateState(const fdm_packet* pkt)
 
 static pthread_mutex_t escTelemetryLock = PTHREAD_MUTEX_INITIALIZER;
 static bool escTelemetryValid;
-static float escMotorErpm[4];
-static float escBatteryVoltage;
+static float escMotorErpm[4];       // eRPM/100, as getDshotErpm()
+static float escBatteryVoltage;     // centivolts, as getBatteryVoltage()
 
 bool sitlHasEscTelemetry(void)
 {
@@ -617,9 +617,9 @@ static void updateEscTelemetry(const fdm_packet_esc *pkt, bool present)
     pthread_mutex_lock(&escTelemetryLock);
     if (present) {
         for (int i = 0; i < 4; i++) {
-            escMotorErpm[i] = pkt->motor_erpm[i];
+            escMotorErpm[i] = pkt->motor_erpm[i] / 100.0;
         }
-        escBatteryVoltage = pkt->battery_voltage;
+        escBatteryVoltage = pkt->battery_voltage * 100.0;
     }
     escTelemetryValid = present;
     pthread_mutex_unlock(&escTelemetryLock);

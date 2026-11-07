@@ -351,6 +351,8 @@ checksum = "a2c754d6c33795a1c324727428e5a7dedb5b06195f9890bdbcba760d3e246563"
 [[package]]
 name = "whippyalgebra"
 version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b20a4cc37549246218553ca7bfc8b5631c170b8d14c3af56acb4eb9896040a64"
 dependencies = [
  "nalgebra",
  "num-traits",
@@ -362,6 +364,8 @@ dependencies = [
 [[package]]
 name = "whippyalgebra-macros"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d1efeeb53b4c581c10a7f8ffe15e7382af0ea791121f6a0f49f243129721ad93"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -381,7 +385,9 @@ dependencies = [
 
 [[package]]
 name = "whippyunits"
-version = "0.3.2"
+version = "0.3.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6380795055c07fcc251c4412cb182ec7da980b65dec99d7e1e2dd49f0820a473"
 dependencies = [
  "bytemuck",
  "culit",
@@ -394,7 +400,9 @@ dependencies = [
 
 [[package]]
 name = "whippyunits-core"
-version = "0.3.1"
+version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dfdedc2ad73fbf730045e0698428ac2a3193f81492192f448d796b8e3723020d"
 dependencies = [
  "num-traits",
  "proc-macro2",
@@ -404,7 +412,9 @@ dependencies = [
 
 [[package]]
 name = "whippyunits-proc-macros"
-version = "0.3.0"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2f02df7cf3c5a5d7e07680d021ad145278af5a2403ce6c31b995c20ff436365a"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",

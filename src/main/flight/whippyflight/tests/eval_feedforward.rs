@@ -94,7 +94,7 @@ fn fly(gains: &GainStorage, axis: usize, amp: Rate, rise: Time) -> Trace {
             gyro_rps: plant.gyro_bf(),
             motor_rps: plant.motor_rps(),
             battery_voltage: battery_v(),
-            accel_g: [0.0; 3],
+            accel: [MetersPerSecSq::new(0.0); 3],
         };
         let out = ctrl.update_with_target(&sensors, &SetpointData { rate_rps: rate, throttle: throttle() },
                                           target, gains);
