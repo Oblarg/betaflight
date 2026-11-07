@@ -12,8 +12,8 @@ crate-type = ["staticlib", "lib"]
 
 [dependencies]
 # Unit-safe quantities — no_std, no alloc
-# >= 0.3.4 for standard gravity (`g_n`).
-whippyunits = { version = "0.3.4", default-features = false }
+# >= 0.3.4 for standard gravity (`g_n`), 0.3.5 for compile-time float rescale factors.
+whippyunits = { version = "0.3.5", default-features = false }
 # Unit-safe linear algebra over nalgebra — no_std, no alloc
 # Correctly rounded sqrtf for no_std (core has none); already in the
 # dependency graph through whippyunits.

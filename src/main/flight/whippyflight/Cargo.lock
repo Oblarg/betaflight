@@ -385,9 +385,9 @@ dependencies = [
 
 [[package]]
 name = "whippyunits"
-version = "0.3.4"
+version = "0.3.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6380795055c07fcc251c4412cb182ec7da980b65dec99d7e1e2dd49f0820a473"
+checksum = "12acb132ed8d17c1cc04a896f0a9f8494b0f9eec8754eba36f8c1c1119a23439"
 dependencies = [
  "bytemuck",
  "culit",

@@ -267,15 +267,15 @@ pub type DecaMetersPerSecSq = qty!(dam / s ^ 2, f32);
 pub type RotPerMeter = qty!(rot / m, f32);
 
 /// Standard gravity g₀.
-pub const STANDARD_GRAVITY: DecaMetersPerSecSq = quantity!(1.0, g_n, f32);
+pub const STANDARD_GRAVITY: MetersPerSecSq = mps2(quantity!(1.0, g_n, f32));
 
 /// m/s² of a quantity declared in g₀.
-pub fn mps2(a: DecaMetersPerSecSq) -> MetersPerSecSq {
+pub const fn mps2(a: DecaMetersPerSecSq) -> MetersPerSecSq {
     rescale_f32(a)
 }
 
 /// Specific force from an accelerometer reading in g₀.
-pub fn accel_from_g(g: f32) -> MetersPerSecSq {
+pub const fn accel_from_g(g: f32) -> MetersPerSecSq {
     mps2(quantity!(g, g_n, f32))
 }
 

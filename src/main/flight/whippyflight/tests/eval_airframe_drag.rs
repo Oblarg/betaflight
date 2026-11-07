@@ -33,7 +33,7 @@ fn throttle() -> f32 {
 }
 const LP: Hertz = Hertz::new(5.0);
 fn g0() -> Accel {
-    mps2(STANDARD_GRAVITY).lossy_into()
+    STANDARD_GRAVITY.lossy_into()
 }
 
 /// Plant drag [roll←ax, roll←ay, pitch←ax, pitch←ay], the size of the

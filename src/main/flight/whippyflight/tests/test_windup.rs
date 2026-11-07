@@ -22,12 +22,12 @@ fn load() -> GainStorage {
 }
 
 /// Open-loop sensors: every motor at `speed` × the blob's hover speed.
-fn sensors(gains: &GainStorage, speed: f32, gyro: [RotPerSec; 3], accel: [DecaMetersPerSecSq; 3]) -> SensorData {
+fn sensors(gains: &GainStorage, speed: f32, gyro: [RotPerSec; 3], accel: [MetersPerSecSq; 3]) -> SensorData {
     SensorData {
         gyro_rps: gyro,
         motor_rps: [speed * gains.hover_rps; 4],
         battery_voltage: model().battery_v(),
-        accel: accel.map(mps2),
+        accel,
     }
 }
 
@@ -65,9 +65,9 @@ fn run(ctrl: &mut ControllerState, gains: &GainStorage, s: &SensorData, duration
         .collect()
 }
 
-const ZERO_ACCEL: DecaMetersPerSecSq = quantity!(0.0, g_n, f32);
-const ONE_G: [DecaMetersPerSecSq; 3] = [ZERO_ACCEL, ZERO_ACCEL, STANDARD_GRAVITY];
-const NO_ACCEL: [DecaMetersPerSecSq; 3] = [ZERO_ACCEL; 3];
+const ZERO_ACCEL: MetersPerSecSq = quantity!(0.0, m / s ^ 2, f32);
+const ONE_G: [MetersPerSecSq; 3] = [ZERO_ACCEL, ZERO_ACCEL, STANDARD_GRAVITY];
+const NO_ACCEL: [MetersPerSecSq; 3] = [ZERO_ACCEL; 3];
 
 fn growing(i: &[Rotation]) -> bool {
     *i.last().unwrap() > i[0] + Rotation::new(1e-12)
@@ -118,7 +118,7 @@ fn landing_stops_accumulation() {
 fn slow_motors_in_the_air_are_not_a_landing() {
     let gains = load();
     // Low thrust but falling (specific force ≪ 1 g), or tumbling: airborne.
-    for (gyro, accel) in [(STILL, [ZERO_ACCEL, ZERO_ACCEL, quantity!(0.3, g_n, f32)]), (PITCHING, ONE_G), (PITCHING, NO_ACCEL)] {
+    for (gyro, accel) in [(STILL, [ZERO_ACCEL, ZERO_ACCEL, accel_from_g(0.3)]), (PITCHING, ONE_G), (PITCHING, NO_ACCEL)] {
         let mut ctrl = ControllerState::new();
         run(&mut ctrl, &gains, &sensors(&gains, 1.0, STILL, NO_ACCEL), Seconds::new(0.2));
         let i = run(&mut ctrl, &gains, &sensors(&gains, 0.3, gyro, accel), Seconds::new(2.0));

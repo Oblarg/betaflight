@@ -392,9 +392,9 @@ impl ControllerState {
         let quiet = sensors.gyro_rps.iter().all(|r| r.abs() < LANDED_RATE);
         let a = sensors.accel;
         let accel_mag: MetersPerSecSq = (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]).sqrt();
-        let has_accel = accel_mag > mps2(ACCEL_PRESENT);
+        let has_accel = accel_mag > ACCEL_PRESENT;
         let supported =
-            !has_accel || (accel_mag - mps2(STANDARD_GRAVITY)).abs() < mps2(LANDED_ACCEL_TOLERANCE);
+            !has_accel || (accel_mag - STANDARD_GRAVITY).abs() < LANDED_ACCEL_TOLERANCE;
         if mean_rps < LANDED_SPEED_FRACTION * hover && quiet && supported {
             self.landing_s += dt;
             let hold = if has_accel { LANDED_HOLD } else { LANDED_HOLD_NO_ACCEL };
@@ -415,7 +415,7 @@ impl ControllerState {
         if drag.lp <= Hertz::new(0.0) {
             return None;
         }
-        let limit = mps2(DRAG_ACCEL_LIMIT);
+        let limit = DRAG_ACCEL_LIMIT;
         let a = [0, 1].map(|i| sensors.accel[i].clamp(-limit, limit));
         // One-pole low-pass; 2πf·dt/(1 + 2πf·dt) ≈ 1 − e^{−2πf·dt} at f ≪ 1/dt.
         let x: f32 = (2.0 * core::f32::consts::PI * drag.lp * dt).into();
@@ -503,7 +503,7 @@ impl ControllerState {
 /// Bound on each accelerometer axis fed to the drag model, so impacts
 /// don't charge its low-pass.
 #[cfg(feature = "airframe-drag")]
-const DRAG_ACCEL_LIMIT: DecaMetersPerSecSq = quantity!(3.0, g_n, f32);
+const DRAG_ACCEL_LIMIT: MetersPerSecSq = mps2(quantity!(3.0, g_n, f32));
 
 /// Bound on the integral state's low-passed error e_int/dt.
 const INTEGRAL_ERROR_RATE_LIMIT: RotPerSec = RotPerSec::new(0.25);
@@ -540,10 +540,10 @@ const LANDED_RATE: RotPerSec = RotPerSec::new(0.05);
 /// With an accelerometer, ground contact also reads a steady 1 g₀ (±this)
 /// although the motors make well under it; in the air at that thrust the
 /// specific force is the low thrust itself (falling reads ≪ 1 g₀).
-const LANDED_ACCEL_TOLERANCE: DecaMetersPerSecSq = quantity!(0.15, g_n, f32);
+const LANDED_ACCEL_TOLERANCE: MetersPerSecSq = mps2(quantity!(0.15, g_n, f32));
 /// How long the landing condition must hold: with / without accelerometer.
 const LANDED_HOLD: Seconds = Seconds::new(0.5);
 const LANDED_HOLD_NO_ACCEL: Seconds = Seconds::new(1.0);
 /// Below this magnitude the accelerometer is taken as absent (not fitted,
 /// or USE_ACC off: the glue leaves it zero).
-const ACCEL_PRESENT: DecaMetersPerSecSq = quantity!(0.2, g_n, f32);
+const ACCEL_PRESENT: MetersPerSecSq = mps2(quantity!(0.2, g_n, f32));
