@@ -8,7 +8,9 @@
 //! the interpolated entries are gauged into typed `MixedUnitMatrix` values,
 //! which checks at compile time that every table feeds the matrix of its unit.
 
-use crate::gains::{GainStorage, GainTable, ReferenceModel, TableEntry, REF_FLOATS};
+use crate::gains::{
+    ref_slots_from_motors, GainStorage, GainTable, ReferenceModel, TableEntry, REF_FLOATS, REF_MOTOR_SLOTS,
+};
 use crate::types::*;
 
 use nalgebra::SMatrix;
@@ -76,7 +78,7 @@ macro_rules! interpolate_4x3 {
     }};
 }
 
-/// Interpolate gains at the given motor speeds (in model units).
+/// Interpolate gains at the given motor speeds (shaft rev/s).
 pub fn interpolate_gains(
     motor_rps: &[RotPerSec; 4],
     storage: &GainStorage,
@@ -104,10 +106,25 @@ pub fn interpolate_gains(
         kd: interpolate_4x3!(vertices, storage.kd),
         kp: interpolate_4x3!(vertices, storage.kp),
         binv: interpolate_4x3!(vertices, storage.binv),
-        ref_model: ReferenceModel::from_slots(&if storage.has_ref_model {
-            vertices.interpolate::<f32, REF_FLOATS>(&storage.ref_model)
-        } else {
+        ref_model: ReferenceModel::from_slots(&if !storage.has_ref_model {
             [0.0; REF_FLOATS]
+        } else if storage.ref_per_motor {
+            per_motor_ref(storage, &floor_idx, &frac)
+        } else {
+            vertices.interpolate::<f32, REF_FLOATS>(&storage.ref_model)
         }),
     }
+}
+
+/// The v8 reference model: each motor's slots interpolated along its own speed.
+fn per_motor_ref(storage: &GainStorage, floor_idx: &[usize; 4], frac: &[f32; 4]) -> [f32; REF_FLOATS] {
+    let motors = core::array::from_fn(|m| {
+        storage.ref_model.blend_slots::<REF_MOTOR_SLOTS>(
+            4 * REF_MOTOR_SLOTS,
+            m * REF_MOTOR_SLOTS,
+            &[floor_idx[m], floor_idx[m] + 1],
+            &[1.0 - frac[m], frac[m]],
+        )
+    });
+    ref_slots_from_motors(&storage.ref_const, &motors)
 }

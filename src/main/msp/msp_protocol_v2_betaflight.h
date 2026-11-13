@@ -38,6 +38,14 @@
 #define MSP2_CLI_SETTING_INFO               0x3011
 #define MSP2_CLI_COMMAND                    0x3012
 
+// WhippyFlight gain store (USE_WHIPPYFLIGHT), well clear of upstream's
+// sequential allocation; see flight/whippyflight_msp.c.
+#define MSP2_WHIPPYFLIGHT_STATUS            0x3100
+#define MSP2_WHIPPYFLIGHT_UPLOAD_BEGIN      0x3101
+#define MSP2_WHIPPYFLIGHT_UPLOAD_DATA       0x3102
+#define MSP2_WHIPPYFLIGHT_UPLOAD_COMMIT     0x3103
+#define MSP2_WHIPPYFLIGHT_UPLOAD_ABORT      0x3104
+
 // MSP2_CLI_COMMAND response flags (byte following the u16 total-length header)
 #define MSP2_CLI_COMMAND_FLAG_TRUNCATED     (1 << 0) // output exceeded the pageable buffer
 #define MSP2_CLI_COMMAND_FLAG_REFUSED       (1 << 1) // command refused or paging session mismatch

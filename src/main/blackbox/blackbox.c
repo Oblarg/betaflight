@@ -68,6 +68,9 @@
 #include "flight/pid.h"
 #include "flight/position.h"
 #include "flight/rpm_filter.h"
+#ifdef USE_WHIPPYFLIGHT
+#include "flight/whippyflight_glue.h"
+#endif
 #include "flight/servos.h"
 #include "flight/imu.h"
 
@@ -85,6 +88,7 @@
 #include "pg/pilot.h"
 #include "pg/pos_hold.h"
 #include "pg/rx.h"
+#include "pg/whippyflight.h"
 
 #include "rx/rx.h"
 
@@ -1760,6 +1764,14 @@ static bool blackboxWriteSysinfo(void)
         BLACKBOX_PRINT_HEADER_LINE(PARAM_NAME_RPM_FILTER_MIN_HZ, "%d",        rpmFilterConfig()->rpm_filter_min_hz);
         BLACKBOX_PRINT_HEADER_LINE(PARAM_NAME_RPM_FILTER_FADE_RANGE_HZ, "%d", rpmFilterConfig()->rpm_filter_fade_range_hz);
         BLACKBOX_PRINT_HEADER_LINE(PARAM_NAME_RPM_FILTER_LPF_HZ, "%d",        rpmFilterConfig()->rpm_filter_lpf_hz);
+#endif
+#ifdef USE_WHIPPYFLIGHT
+        BLACKBOX_PRINT_HEADER_LINE(PARAM_NAME_WHIPPYFLIGHT_ENABLED, "%d",     whippyflightIsActive());
+        BLACKBOX_PRINT_HEADER_LINE(PARAM_NAME_WHIPPYFLIGHT_RPM_LPF_HZ, "%d",  whippyflightConfig()->rpm_lpf_hz);
+        // lambda itself, not the setting's hundredths
+        BLACKBOX_PRINT_HEADER_LINE(PARAM_NAME_WHIPPYFLIGHT_STICK_TRACKING, "%d.%02d",
+                                   whippyflightConfig()->stick_tracking / 100, whippyflightConfig()->stick_tracking % 100);
+        BLACKBOX_PRINT_HEADER_LINE(PARAM_NAME_WHIPPYFLIGHT_IDLE_RPS, "%d",    whippyflightConfig()->idle_rps);
 #endif
 #if defined(USE_ACC)
         BLACKBOX_PRINT_HEADER_LINE(PARAM_NAME_ACC_LPF_HZ, "%d",        (int)(accelerometerConfig()->acc_lpf_hz * 100.0f));

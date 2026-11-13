@@ -1,25 +1,26 @@
 {
+  "motor_speed": "shaft rev/s",
   "yaw": {
     "yawRate": -1.5122453665584237,
-    "propVelSumSq": 4.8682281926225826e-05,
-    "propAccelSum": 0.0030594457334088285
+    "propVelSumSq": 1.7525621493441298e-05,
+    "propAccelSum": 0.001835667440045297
   },
   "pitch": {
     "pitchRate": 0.7024389110924613,
-    "propVelSumSq": 0.0002934088599815502,
+    "propVelSumSq": 0.00010562718959335807,
     "dFront": 1.0,
     "dBack": 1.0856154931168316
   },
   "roll": {
     "rollRate": 1.2612784020193137,
-    "propVelSumSq": 0.0003434081413733568,
+    "propVelSumSq": 0.00012362693089440843,
     "dLeft": 1.116803876697371,
     "dRight": 1.0
   },
   "motors": {
-    "motorVel": 0.006572909232846221,
-    "motorVelSq": 2.749797043793432e-06,
-    "motorAccel": 0.0003504673209083212
+    "motorVel": 0.003943745539707732,
+    "motorVelSq": 9.899269357656356e-07,
+    "motorAccel": 0.0002102803925449927
   },
   "drag": {
     "axes": [],
@@ -94,7 +95,7 @@
   },
   "airframe": {
     "vbat_v": 3.85,
-    "hover_rps": 267.3,
+    "hover_rps": 445.50000000000006,
     "cells": 1,
     "craft": "M65Pro",
     "board": "BEFH BETAFPVF411",

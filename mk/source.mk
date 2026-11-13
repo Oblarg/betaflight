@@ -39,6 +39,7 @@ PG_SRC = \
             pg/pos_hold_wing.c \
             pg/rcdevice.c \
             pg/rpm_filter.c \
+            pg/whippyflight.c \
             pg/rx.c \
             pg/rx_pwm.c \
             pg/rx_spi.c \
@@ -188,6 +189,7 @@ COMMON_SRC = \
             flight/pid.c \
             flight/pid_init.c \
             flight/whippyflight_glue.c \
+            flight/whippyflight_msp.c \
             flight/position.c \
             flight/position_estimator.c \
             flight/position_filter.c \

@@ -21,16 +21,17 @@ libm = "0.2"
 # Zero-copy typed views of the gain blob's tables.
 bytemuck = { version = "1", default-features = false }
 whippyalgebra = { version = "0.1.1", default-features = false, features = ["nalgebra"] }
-
-[dev-dependencies]
-# Eval plant reads gen_wfg's coefficient JSON.
-serde_json = "1"
+# The sim plant reads fit_model.py's coefficient JSON.
+serde_json = { version = "1", optional = true }
 
 [features]
 default = []
 # Enable std for host-side testing (cargo test on x86); host builds always
-# carry the airframe drag mode so the tests and evals exercise it.
-std = ["whippyunits/std", "whippyalgebra/std", "airframe-drag"]
+# carry the airframe drag mode and the sim so the tests and evals exercise them.
+std = ["whippyunits/std", "whippyalgebra/std", "airframe-drag", "sim"]
+# The nonlinear plant and stick-flick simulation (`sim`), for the evals and
+# the Configurator's WhippyFlight tab.
+sim = ["std", "dep:serde_json"]
 # Compensate the rotor-drag torque of tall frames from the accelerometer
 # when the blob has a drag block (v7).  Off by default: small frames don't
 # need it, and without it the block is parsed but ignored.

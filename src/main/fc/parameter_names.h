@@ -159,6 +159,10 @@
 #define PARAM_NAME_RPM_FILTER_MIN_HZ "rpm_filter_min_hz"
 #define PARAM_NAME_RPM_FILTER_FADE_RANGE_HZ "rpm_filter_fade_range_hz"
 #define PARAM_NAME_RPM_FILTER_LPF_HZ "rpm_filter_lpf_hz"
+#define PARAM_NAME_WHIPPYFLIGHT_RPM_LPF_HZ "whippyflight_rpm_lpf_hz"
+#define PARAM_NAME_WHIPPYFLIGHT_ENABLED "whippyflight_enabled"
+#define PARAM_NAME_WHIPPYFLIGHT_STICK_TRACKING "whippyflight_stick_tracking"
+#define PARAM_NAME_WHIPPYFLIGHT_IDLE_RPS "whippyflight_idle_rps"
 
 #define PARAM_NAME_ALTITUDE_SOURCE "altitude_source"
 #define PARAM_NAME_ALTITUDE_PREFER_BARO "altitude_prefer_baro"

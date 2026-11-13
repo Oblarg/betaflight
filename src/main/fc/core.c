@@ -512,7 +512,7 @@ if (crashFlipModeActive) {
 #endif
 
 #ifdef USE_WHIPPYFLIGHT
-        if (whippyflightIsReadyToArm()) {
+        if (!whippyflightIsActive() || whippyflightIsReadyToArm()) {
             unsetArmingDisabled(ARMING_DISABLED_WHIPPYFLIGHT);
         } else {
             setArmingDisabled(ARMING_DISABLED_WHIPPYFLIGHT);
@@ -1428,7 +1428,6 @@ void processRxModes(timeUs_t currentTimeUs)
     pidSetAntiGravityState(IS_RC_MODE_ACTIVE(BOXANTIGRAVITY) || featureIsEnabled(FEATURE_ANTI_GRAVITY));
 }
 
-#ifndef USE_WHIPPYFLIGHT
 static FAST_CODE_NOINLINE_CRITICAL void subTaskPidController(timeUs_t currentTimeUs)
 {
     uint32_t startTime = 0;
@@ -1482,7 +1481,6 @@ static FAST_CODE_NOINLINE_CRITICAL void subTaskPidController(timeUs_t currentTim
     }
 #endif
 }
-#endif // USE_WHIPPYFLIGHT
 
 static FAST_CODE_NOINLINE void subTaskPidSubprocesses(timeUs_t currentTimeUs)
 {
@@ -1516,7 +1514,6 @@ void subTaskTelemetryPollSensors(timeUs_t currentTimeUs)
 }
 #endif
 
-#ifndef USE_WHIPPYFLIGHT
 static FAST_CODE void subTaskMotorUpdate(timeUs_t currentTimeUs)
 {
     uint32_t startTime = 0;
@@ -1553,7 +1550,6 @@ static FAST_CODE void subTaskMotorUpdate(timeUs_t currentTimeUs)
 
     DEBUG_SET(DEBUG_PIDLOOP, 2, micros() - startTime);  //!< Motor Update Time [unit:us]
 }
-#endif // USE_WHIPPYFLIGHT
 
 static FAST_CODE_NOINLINE void subTaskRcCommand(timeUs_t currentTimeUs)
 {
@@ -1639,11 +1635,14 @@ FAST_CODE void taskMainPidLoop(timeUs_t currentTimeUs)
     // WhippyFlight replaces both the PID controller and the mixer with a
     // single Rust LQR controller call.  Crashflip, disarm, failsafe, and
     // motor stop are handled inside the glue layer.
-    whippyflightPidAndMotorUpdate(currentTimeUs);
-#else
-    subTaskPidController(currentTimeUs);
-    subTaskMotorUpdate(currentTimeUs);
+    if (whippyflightIsActive()) {
+        whippyflightPidAndMotorUpdate(currentTimeUs);
+    } else
 #endif
+    {
+        subTaskPidController(currentTimeUs);
+        subTaskMotorUpdate(currentTimeUs);
+    }
 
     subTaskPidSubprocesses(currentTimeUs);
 

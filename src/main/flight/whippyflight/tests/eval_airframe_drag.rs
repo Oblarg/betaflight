@@ -128,7 +128,7 @@ fn scaled(c: [PerMeter; 4], s: f64) -> [RotPerMeter; 4] {
 }
 
 #[test]
-fn v7_drag_block_parses() {
+fn drag_block_parses() {
     let c = [1.0, 2.0, 3.0, 4.0].map(RotPerMeter::new);
     let gains = load(Some(c));
     assert_eq!(gains.airframe_drag, drag_block(c));

@@ -20,14 +20,14 @@
 
 mod common;
 
-use common::noise::Noise;
+use common::noise::{Noise, fixture_noise};
 use common::plant::{duty_volts, Plant};
-use common::units::{Angle, AngAccel, Freq, Millis, Rate, SpeedSq, Time, TimeSq, Voltage, VoltageSq};
+use common::units::{AngAccel, Freq, Millis, Rate, SpeedSq, Time, Voltage, VoltageSq};
 use whippyflight_control::controller::ControllerState;
 use whippyflight_control::gains::{load_gains, GainStorage};
 use whippyflight_control::setpoint::SetpointEstimator;
+use whippyflight_control::sim::margin::{self, detrended_p2p, GyroPath, HOVER_SCALE};
 use whippyflight_control::types::*;
-use whippyunits::api::rescale;
 use whippyunits::value;
 
 static TEST_WFG: &[u8] = include_bytes!("../tools/test_gains.wfg");
@@ -54,53 +54,15 @@ fn rps(r: Rate) -> f64 {
     value!(r, rot / s)
 }
 
-/// Gyro path: PT1 stages (BF's pt1FilterGain) then a delay in PID ticks,
-/// fractional delays linearly interpolated between ticks.
-struct GyroPath {
-    gains: Vec<f64>,
-    state: Vec<[Rate; 3]>,
-    /// Filtered samples, newest last.
-    history: std::collections::VecDeque<[Rate; 3]>,
-    delay_ticks: f64,
-}
-
-impl GyroPath {
-    fn new(cutoffs: &[Freq], delay_ticks: usize, dt: Time) -> Self {
-        Self::delayed(cutoffs, delay_ticks as f64, dt)
-    }
-
-    fn delayed(cutoffs: &[Freq], delay_ticks: f64, dt: Time) -> Self {
-        let gains = cutoffs
-            .iter()
-            .map(|&f| {
-                let w = f64::from(2.0 * core::f64::consts::PI * f * dt);
-                w / (w + 1.0)
-            })
-            .collect::<Vec<_>>();
-        let n = gains.len();
-        let history = vec![[Rate::new(0.0); 3]; delay_ticks as usize + 2].into();
-        Self { gains, state: vec![[Rate::new(0.0); 3]; n], history, delay_ticks }
-    }
-
-    /// The plant airframe's logged gyro low-pass stages.
-    fn logged(delay_ticks: usize, dt: Time) -> Self {
-        Self::new(&logged_cutoffs(), delay_ticks, dt)
-    }
+/// The plant airframe's logged gyro low-pass stages, undelayed or delayed.
+fn logged_path(delay_ticks: usize, dt: Time) -> GyroPath {
+    GyroPath::new(&logged_cutoffs(), delay_ticks, dt)
 }
 
 /// The plant airframe's gyro low-pass stages as PT1 cutoffs: BF's PT2/PT3
 /// are 2/3 PT1s at the cutoff × CUTOFF_CORRECTION_PT2/PT3 (filter.c).
 fn logged_cutoffs() -> Vec<Freq> {
-    common::plant::model()
-        .gyro_lpf
-        .iter()
-        .flat_map(|&(ref kind, hz)| match kind.as_str() {
-            "PT1" => vec![hz],
-            "PT2" => vec![hz * 1.553_773_974; 2],
-            "PT3" => vec![hz * 1.961_459_177; 3],
-            _ => panic!("gyro LPF type {kind} is not modeled"),
-        })
-        .collect()
+    margin::pt1_cutoffs(common::plant::model()).unwrap_or_else(|e| panic!("{e}"))
 }
 
 /// Display name of the logged gyro path, e.g. "PT1 275 + PT1 550".
@@ -112,24 +74,6 @@ fn logged_name() -> String {
     stages.iter().map(|(k, hz)| format!("{k} {:.0}", value!(*hz, Hz))).collect::<Vec<_>>().join(" + ")
 }
 
-impl GyroPath {
-
-    fn filter(&mut self, x: [RotPerSec; 3]) -> [RotPerSec; 3] {
-        let mut y: [Rate; 3] = x.map(|v| v.lossy_into());
-        for (&k, s) in self.gains.iter().zip(self.state.iter_mut()) {
-            for a in 0..3 {
-                s[a] = s[a] + k * (y[a] - s[a]);
-            }
-            y = *s;
-        }
-        self.history.pop_front();
-        self.history.push_back(y);
-        let (n, f) = (self.delay_ticks.floor() as usize, self.delay_ticks.fract());
-        let last = self.history.len() - 1;
-        let (a, b) = (self.history[last - n], self.history[last - n - 1]);
-        core::array::from_fn(|i| ((1.0 - f) * a[i] + f * b[i]).lossy_into())
-    }
-}
 
 struct Metrics {
     rise90: Time,
@@ -180,9 +124,9 @@ fn plant_dt(gains: &GainStorage) -> Time {
 fn noisy_hover(gains: &GainStorage, gyro_scale: f32, motor_scale: f32) -> (Voltage, Rate) {
     let dt = plant_dt(gains);
     let still = Rate::new(0.0);
-    let clean = fly_inner(gains, still, still, SETTLE, GyroPath::logged(0, dt), None);
-    let noisy = fly_inner(gains, still, still, SETTLE, GyroPath::logged(0, dt),
-                          Some(&Noise::new(Time::new(0.0), gyro_scale, motor_scale)));
+    let clean = fly_inner(gains, still, still, SETTLE, logged_path(0, dt), None);
+    let noisy = fly_inner(gains, still, still, SETTLE, logged_path(0, dt),
+                          Some(&fixture_noise(Time::new(0.0), gyro_scale, motor_scale)));
     let jitter_sq = noisy.trace.iter().zip(&clean.trace)
         .map(|(a, b)| {
             (0..3).fold(SpeedSq::new(0.0), |acc, i| {
@@ -198,37 +142,12 @@ fn noise_scale() -> f32 {
     std::env::var("NOISE_SCALE").map_or(1.0, |s| s.parse().expect("NOISE_SCALE"))
 }
 
-/// Fraction of the front-back arm the CG shifts by in `trim`.
-const TRIM_CG_SHIFT: f64 = 0.05;
-/// How long `trim` flies after the shift.
-const TRIM: Time = Time::new(3.0);
-
-/// Pitch angular acceleration (BF axes) a TRIM_CG_SHIFT CG shift causes at
-/// the eval hover: the hover thrust k_T·Σω² on a lever arm TRIM_CG_SHIFT of
-/// the (unit) front-back arm.
-fn trim_torque() -> AngAccel {
-    let m = common::plant::model();
-    let w = HOVER_SCALE * m.hover_rps;
-    TRIM_CG_SHIFT * m.pitch_prop_vel_sq * 4.0 * (w * w)
-}
-
-/// Integrator trim: hover, shift the CG by TRIM_CG_SHIFT (a step pitch
-/// torque) at SETTLE, and return (attitude it costs, deg, = |∫ pitch
-/// rate| over TRIM; residual pitch rate over the last 0.5 s).  The rate
-/// loop alone holds a constant rate error under a constant torque; the
-/// (leaky) integrator is what brings it back toward zero.
+/// [`margin::trim`] on the eval plant's logged gyro path: (attitude cost, deg; residual pitch rate).
 fn trim(gains: &GainStorage) -> (f64, Rate) {
-    let dt = plant_dt(gains);
-    let still = Rate::new(0.0);
-    let m = fly_inner_with(gains, still, still, SETTLE, GyroPath::logged(0, dt), None, trim_torque(), TRIM);
-    let pitch: Vec<Rate> = m.trace.iter().map(|r| r[1]).collect();
-    let angle: Angle = pitch.iter().fold(Rate::new(0.0), |acc, &r| acc + r) * dt;
-    let tail = f64::from(Time::new(0.5) / dt) as usize;
-    let residual = pitch[pitch.len() - tail..].iter().fold(Rate::new(0.0), |acc, &r| acc + r) / tail as f64;
-    (value!(angle, deg).abs(), residual)
+    let (angle, residual) = margin::trim(gains, common::plant::model(), &logged_cutoffs());
+    (value!(angle, deg), residual)
 }
 
-const HOVER_SCALE: f64 = 250.0 / 270.0;
 
 fn fly_inner(gains: &GainStorage, amp: Rate, kick: Rate, settle: Time, path: GyroPath,
              noise: Option<&Noise>) -> Metrics {
@@ -350,54 +269,9 @@ fn load() -> GainStorage {
     gains
 }
 
-/// Largest extra gyro delay on top of `cutoffs` that still flies both
-/// SUMMARY flicks cleanly: bisected over 0–MAX_MARGIN with a fractional
-/// delay, so it ranks candidates instead of saturating at a tick cap.  −1 ms
-/// if the path isn't clean without extra delay; MAX_MARGIN if it never
-/// breaks.  A time rather than ticks so loop rates compare.
+/// [`margin::delay_margin`] on the eval plant.
 fn delay_margin(gains: &GainStorage, cutoffs: &[Freq]) -> Millis {
-    let dt = plant_dt(gains);
-    let ok = |delay: Millis| {
-        let delay: Time = rescale(delay);
-        [Rate::new(0.05), Rate::new(0.5)]
-            .iter()
-            .all(|&a| clean(&fly(gains, a, GyroPath::delayed(cutoffs, f64::from(delay / dt), dt))))
-    };
-    if !ok(Millis::new(0.0)) {
-        return Millis::new(-1.0);
-    }
-    if ok(MAX_MARGIN) {
-        return MAX_MARGIN;
-    }
-    let (mut lo, mut hi) = (Millis::new(0.0), MAX_MARGIN);
-    while hi - lo > MARGIN_RESOLUTION {
-        let mid = 0.5 * (lo + hi);
-        if ok(mid) { lo = mid } else { hi = mid }
-    }
-    lo
-}
-
-const MAX_MARGIN: Millis = Millis::new(16.0);
-const MARGIN_RESOLUTION: Millis = Millis::new(0.1);
-
-/// Peak-to-peak of `(t, y)` samples about their least-squares line.
-fn detrended_p2p(samples: &[(Time, Rate)]) -> Rate {
-    let n = samples.len() as f64;
-    let (mt, my) = samples.iter().fold((Time::new(0.0), Rate::new(0.0)), |(a, b), &(t, y)| (a + t / n, b + y / n));
-    let (stt, sty) = samples.iter().fold((TimeSq::new(0.0), Angle::new(0.0)), |(a, b), &(t, y)| {
-        (a + (t - mt) * (t - mt), b + (t - mt) * (y - my))
-    });
-    let slope = if stt > TimeSq::new(0.0) { sty / stt } else { AngAccel::new(0.0) };
-    let (lo, hi) = samples.iter().fold((Rate::new(f64::MAX), Rate::new(f64::MIN)), |(lo, hi), &(t, y)| {
-        let r = y - my - slope * (t - mt);
-        (lo.min(r), hi.max(r))
-    });
-    hi - lo
-}
-
-/// Settled without limit cycling or chattering on the rails.
-fn clean(m: &Metrics) -> bool {
-    m.rest_p2p < Rate::new(0.005) && m.sat_frac < 0.1
+    margin::delay_margin(gains, common::plant::model(), cutoffs)
 }
 
 #[test]
@@ -407,11 +281,11 @@ fn lag_margin_summary() {
     let dt = plant_dt(&gains);
     let nominal = fly(&gains, Rate::new(0.5), GyroPath::new(&[], 0, dt));
     let logged = logged_cutoffs();
-    let flown = fly(&gains, Rate::new(0.5), GyroPath::logged(0, dt));
-    let flown_small = fly(&gains, Rate::new(0.05), GyroPath::logged(0, dt));
+    let flown = fly(&gains, Rate::new(0.5), logged_path(0, dt));
+    let flown_small = fly(&gains, Rate::new(0.05), logged_path(0, dt));
     let margin = |cutoffs: &[Freq]| value!(delay_margin(&gains, cutoffs), ms);
     let hover = kick(&gains, GyroPath::new(&[], 0, dt));
-    let logged_kick = kick(&gains, GyroPath::logged(0, dt));
+    let logged_kick = kick(&gains, logged_path(0, dt));
     let (rough_v, jitter) = noisy_hover(&gains, noise_scale(), noise_scale());
     let (trim_deg, trim_residual) = trim(&gains);
     println!("SUMMARY rise90_ms={:.1} overshoot={:.3} sat={:.3} hover_pitch={:.4} kick_ms={:.1} \
@@ -419,7 +293,7 @@ fn lag_margin_summary() {
               logged_p2p={:.4} logged_sat={:.3} logged_small_p2p={:.4} delay_margin_ms={:.2} \
               logged_delay_margin_ms={:.2} rough_v={:.4} jitter={:.5} trim_deg={:.2} trim_residual={:.5}",
              ms(nominal.rise90), nominal.overshoot, nominal.sat_frac,
-             rps(hover_pitch(&gains, GyroPath::logged(0, dt))), ms(hover.recover),
+             rps(hover_pitch(&gains, logged_path(0, dt))), ms(hover.recover),
              ms(logged_kick.recover), ms(hover.kick_iae), ms(logged_kick.kick_iae),
              flown.overshoot, rps(flown.rest_p2p), flown.sat_frac, rps(flown_small.rest_p2p),
              margin(&[]), margin(&logged), value!(rough_v, V), rps(jitter), trim_deg, rps(trim_residual));

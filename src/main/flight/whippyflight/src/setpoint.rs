@@ -108,11 +108,23 @@ impl SetpointEstimator {
         self.period_s = Seconds::new(0.0);
     }
 
-    /// The default λ with the gain blob's target limits, falling back to
-    /// the defaults for any the blob doesn't set.
+    /// The gain blob's target limits, falling back to the defaults for any
+    /// the blob doesn't set; λ is kept.
     pub fn configure_for(&mut self, gains: &GainStorage) {
         let (slew, jerk) = target_limits(gains);
-        self.configure(DEFAULT_LAMBDA_500HZ, slew, jerk);
+        self.configure(self.lambda_ref, slew, jerk);
+    }
+
+    /// Set λ at a 500 Hz link, keeping the estimate.  λ ≤ 0 would freeze
+    /// the estimate (α = 0), so it selects the default.
+    pub fn set_lambda(&mut self, lambda_500hz: f32) {
+        let lambda_500hz = if lambda_500hz > 0.0 { lambda_500hz } else { DEFAULT_LAMBDA_500HZ };
+        if lambda_500hz != self.lambda_ref {
+            self.lambda_ref = lambda_500hz;
+            if self.period_s > Seconds::new(0.0) {
+                self.set_period(self.period_s);
+            }
+        }
     }
 
     /// A new RX packet: raw (unsmoothed) setpoint [roll, pitch, yaw], its

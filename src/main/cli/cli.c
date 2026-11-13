@@ -6497,7 +6497,7 @@ RAM_CODE static void cliStatus(const char *cmdName, char *cmdline)
     }
     cliPrintLinefeed();
 #ifdef USE_WHIPPYFLIGHT
-    const char *wfBlockReason = whippyflightArmingBlockReason();
+    const char *wfBlockReason = whippyflightIsActive() ? whippyflightArmingBlockReason() : NULL;
     if (wfBlockReason) {
         cliPrintLinef("WHIPPYFLIGHT: %s", wfBlockReason);
     }

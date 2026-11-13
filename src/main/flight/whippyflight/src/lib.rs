@@ -22,6 +22,8 @@ mod ffi;
 pub mod gains;
 pub mod interpolation;
 pub mod setpoint;
+#[cfg(feature = "sim")]
+pub mod sim;
 pub mod types;
 
 // Panic handler for embedded — required by no_std staticlib builds.

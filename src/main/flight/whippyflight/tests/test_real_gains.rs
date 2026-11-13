@@ -14,7 +14,7 @@ mod common;
 
 use common::units::{Rate, Time};
 use whippyflight_control::controller::ControllerState;
-use whippyflight_control::gains::{load_gains, GainStorage, REF_FLOATS};
+use whippyflight_control::gains::{load_gains, GainStorage, REF_MOTOR_SLOTS};
 use whippyflight_control::types::*;
 use whippyunits::value;
 
@@ -29,7 +29,7 @@ fn load_test_gains() -> GainStorage {
     storage
 }
 
-const HOVER_RPS: RotPerSec = RotPerSec::new(275.0);
+const HOVER_RPS: RotPerSec = RotPerSec::new(460.0);
 const FULL: Volt = Volt::new(16.8);
 const ZERO_V: Volt = Volt::new(0.0);
 
@@ -77,7 +77,7 @@ fn rot(x: Rotation) -> f32 {
 fn real_gains_load_successfully() {
     let gains = load_test_gains();
     assert_eq!(gains.header.resolution, 3);
-    assert!((gains.header.min_rps - RotPerSec::new(50.0)).abs() < RotPerSec::new(0.01));
+    assert!((gains.header.min_rps - RotPerSec::new(80.0)).abs() < RotPerSec::new(0.01));
     // gen_wfg derives the top of the grid from the motor fit on a full
     // battery, well above hover.
     let max_rps: Rate = gains.header.max_rps.lossy_into();
@@ -386,7 +386,7 @@ fn reset_clears_integral_and_derivative_state() {
 
 // ── Affine linearizer ───────────────────────────────────────────────────
 
-/// motorVelSq of the coefficient JSON (V per (eRPM/600)²).
+/// motorVelSq of the coefficient JSON (V per (rev/s)²).
 fn k_omega_sq() -> VoltPerRpsSq {
     common::plant::model().motor_vel_sq.lossy_into()
 }
@@ -414,7 +414,7 @@ fn affine_cancels_quadratic_motor_term_at_hover() {
 fn affine_tracks_each_motor_speed() {
     let gains = load_test_gains();
     let mut ctrl = ControllerState::new();
-    let speeds = [300.0, 250.0, 250.0, 300.0].map(RotPerSec::new);
+    let speeds = [500.0, 420.0, 420.0, 500.0].map(RotPerSec::new);
     let sensors = SensorData { motor_rps: speeds, ..make_hover_sensors(FULL) };
     ctrl.update(&sensors, &make_hover_setpoint(), &gains);
 
@@ -516,13 +516,13 @@ fn blob_has_reference_model() {
     assert_eq!(gains.header.ff_horizon, 8);
 }
 
-// Reference values: tools/ff_reference.py (float64, uniform 275 rps, h = 8).
+// Reference values: tools/ff_reference.py (float64, uniform 460 rev/s, h = 8).
 
 #[test]
 fn pitch_flick_feedforward_matches_reference() {
     let ff = stick_flick_feedforward(1, 1200);
     let p = peak(&ff);
-    assert!((p - Volt::new(4.331)).abs() < Volt::new(0.22), "peak pitch feedforward {p:?}, reference 4.331 V");
+    assert!((p - Volt::new(4.316)).abs() < Volt::new(0.22), "peak pitch feedforward {p:?}, reference 4.316 V");
     let last = ff.last().unwrap();
     assert!(last.iter().all(|v| v.abs() < Volt::new(0.03)), "settled feedforward {last:?}");
     // Direction: +pitch request drives motors 0,2 (as feedback does).
@@ -611,11 +611,72 @@ fn reference_model_seeds_without_kick() {
     assert!(ff.iter().all(|v| v.abs() < Volt::new(1.0)), "{ff:?}");
 }
 
+/// Armed on the ground: every motor at 0.2× the blob's hover speed (about
+/// where bluebird idles), resting at 1 g.
+fn ground_sensors(gains: &GainStorage) -> SensorData {
+    SensorData {
+        gyro_rps: [RotPerSec::new(0.0); 3],
+        motor_rps: [0.2 * gains.hover_rps; 4],
+        battery_voltage: FULL,
+        accel: [MetersPerSecSq::new(0.0), MetersPerSecSq::new(0.0), STANDARD_GRAVITY],
+    }
+}
+
+/// A roll stick ramp to 21 deg/s over 35 ms, then held: bluebird's first
+/// liftoff attempt, where it drove the motors between idle and full.
+fn ground_roll_ramp(dt: Seconds, k: usize) -> SetpointData {
+    let roll = RotPerSec::new(0.06) * f32::from(k as f32 * dt / Seconds::new(0.035)).min(1.0);
+    SetpointData { rate_rps: [roll, RotPerSec::new(0.0), RotPerSec::new(0.0)], throttle: 0.0 }
+}
+
+#[test]
+fn no_feedforward_on_the_ground() {
+    let gains = load_test_gains();
+    let mut ctrl = ControllerState::new();
+    let s = ground_sensors(&gains);
+    for k in 0..f32::from(Seconds::new(0.2) / gains.header.dt) as usize {
+        let sp = ground_roll_ramp(gains.header.dt, k);
+        ctrl.update_with_target(&s, &sp, sp.rate_rps, &gains);
+        let ff = ctrl.telemetry().feedforward_v;
+        assert!(ff.iter().all(|v| *v == ZERO_V), "tick {k}: feedforward {ff:?} on the ground");
+    }
+}
+
+#[test]
+fn takeoff_with_stick_held_has_no_kick() {
+    // Stick held through takeoff: the reference model, kept seeded at the
+    // setpoint on the ground, starts from it, so only the hold term and the
+    // model's motor-speed state settling onto it appear (gyro following the
+    // setpoint keeps the feedback idle) — hundredths of a volt, against a
+    // 4.3 V peak for a pitch flick.
+    let gains = load_test_gains();
+    let dt = gains.header.dt;
+    let mut ctrl = ControllerState::new();
+    let ground = ground_sensors(&gains);
+    let n = f32::from(Seconds::new(0.2) / dt) as usize;
+    for k in 0..n {
+        let sp = ground_roll_ramp(dt, k);
+        ctrl.update_with_target(&ground, &sp, sp.rate_rps, &gains);
+    }
+    let sp = ground_roll_ramp(dt, n);
+    let mut air = make_hover_sensors(FULL);
+    air.motor_rps = [gains.hover_rps; 4];
+    air.gyro_rps = sp.rate_rps;
+    let ff: Vec<[Volt; 4]> = (0..n)
+        .map(|_| {
+            ctrl.update_with_target(&air, &sp, sp.rate_rps, &gains);
+            ctrl.telemetry().feedforward_v
+        })
+        .collect();
+    assert!(peak(&ff[n - 1..]) > ZERO_V, "no feedforward after takeoff");
+    assert!(peak(&ff) < Volt::new(0.1), "takeoff kick: peak {:?}", peak(&ff));
+}
+
 #[test]
 fn min_rps_floor_overrides_reported_speed() {
     // A dead/zero telemetry motor must be linearized at the floor, not 0.
     let gains = load_test_gains();
-    let floor = RotPerSec::new(120.0);
+    let floor = RotPerSec::new(200.0);
     let stopped = [RotPerSec::new(0.0); 4];
     let run = |rps: [RotPerSec; 4], set_floor: bool| {
         let mut ctrl = ControllerState::new();
@@ -644,7 +705,7 @@ fn min_rps_floor_overrides_reported_speed() {
 
 // ── Allocation (idle floor / collective) ────────────────────────────────
 
-/// motorVel of the coefficient JSON (V per eRPM/600).
+/// motorVel of the coefficient JSON (V per rev/s).
 fn k_omega() -> VoltPerRps {
     common::plant::model().motor_vel.lossy_into()
 }
@@ -668,7 +729,7 @@ fn blob_has_motor_drag() {
 
 #[test]
 fn zero_throttle_idles_at_linearization_floor() {
-    let floor = RotPerSec::new(120.0);
+    let floor = RotPerSec::new(200.0);
     let (v, telem) = hover_voltages(0.0, floor, floor);
     let idle = k_omega() * floor + k_omega_sq() * floor * floor;
     let lowest = v.iter().fold(Volt::new(f32::INFINITY), |m, &x| m.min(x));
@@ -694,7 +755,7 @@ fn hover_is_torque_free() {
     // Settle the motors on the controller's own hover voltages (zero rate
     // error, so feedback is idle) and check the lever-arm-weighted thrusts
     // cancel on pitch and roll.  Throttles keep the speeds inside the grid
-    // (≤ 500 rps at 16.8 V), where the linearizer sees the true speeds.
+    // (≤ max_rps), where the linearizer sees the true speeds.
     let gains = load_test_gains();
     let [w_front, w_back, w_left, w_right] = arm_weights();
     let (k_w, k_w2) = (k_omega(), k_omega_sq());
@@ -718,7 +779,7 @@ fn hover_is_torque_free() {
 
 #[test]
 fn quantized_tables_are_views_into_blob() {
-    assert_eq!(u16::from_le_bytes([TEST_WFG[4], TEST_WFG[5]]), 7, "expected a v7 blob");
+    assert_eq!(u16::from_le_bytes([TEST_WFG[4], TEST_WFG[5]]), 8, "expected a v8 blob");
     let blob = common::static_blob(TEST_WFG);
     let mut gains = GainStorage::new();
     assert_eq!(load_gains(blob, &mut gains), GainLoadResult::Ok);
@@ -733,12 +794,15 @@ fn quantized_tables_are_views_into_blob() {
 #[test]
 fn quantized_blend_matches_decoded_values() {
     let gains = load_test_gains();
-    let point = [0usize, 13, 40, 80];
-    let weight = [0.1f32, 0.2, 0.3, 0.4];
-    let blended = gains.ref_model.blend::<REF_FLOATS>(&point, &weight);
+    // Motor 2's slots of the per-motor reference table, between grid speeds 1 and 2.
+    let width = 4 * REF_MOTOR_SLOTS;
+    let first = 2 * REF_MOTOR_SLOTS;
+    let point = [1usize, 2];
+    let weight = [0.3f32, 0.7];
+    let blended = gains.ref_model.blend_slots::<REF_MOTOR_SLOTS>(width, first, &point, &weight);
     for (i, &b) in blended.iter().enumerate() {
         let direct: f32 = point.iter().zip(&weight)
-            .map(|(&p, &w)| w * gains.ref_model.get(p * REF_FLOATS + i))
+            .map(|(&p, &w)| w * gains.ref_model.get(p * width + first + i))
             .sum();
         assert!((b - direct).abs() <= 1e-5 * direct.abs().max(1e-3),
             "slot {i}: blend {b} vs decoded {direct}");

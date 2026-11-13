@@ -18,6 +18,9 @@ use whippyunits::value;
 // Conversion helpers
 // =========================================================================
 
+/// `motor_poles` of the motors these tests read.
+const POLES: u8 = 14;
+
 /// BF's readings as the glue passes them, converted as the FFI does.
 fn bf_sensors(gyro: [DegPerSec; 3], motor_erpm: [HundredErpm; 4], battery: CentiVolt) -> SensorData {
     BfSensorData {
@@ -25,6 +28,7 @@ fn bf_sensors(gyro: [DegPerSec; 3], motor_erpm: [HundredErpm; 4], battery: Centi
         motor_erpm,
         battery,
         accel_g: [0.0; 3],
+        motor_poles: POLES,
     }
     .to_sensor_data()
 }
@@ -96,8 +100,8 @@ fn load_test_gains() -> GainStorage {
     storage
 }
 
-/// eRPM/100 counts of a 200 rot/s (model unit) motor.
-const ERPM_200: [HundredErpm; 4] = [HundredErpm::new(1200.0); 4];
+/// eRPM/100 counts of a 14-pole motor at 200 rot/s: 12000 RPM × 7 pole pairs.
+const ERPM_200: [HundredErpm; 4] = [HundredErpm::new(840.0); 4];
 const MOTORS_200: [RotPerSec; 4] = [RotPerSec::new(200.0); 4];
 
 // =========================================================================
@@ -126,26 +130,25 @@ fn bf_centivolts_to_volts() {
 }
 
 #[test]
-fn bf_erpm_to_model_speed() {
-    // The regression's speed unit is the blackbox eRPM/100 field / 6.
-    let speed = bf_sensors([0.0; 3].map(DegPerSec::new), [350.0, 0.0, 1.0, 1200.0].map(HundredErpm::new), CentiVolt::new(1680.0)).motor_rps;
+fn bf_erpm_to_shaft_speed() {
+    // 14 poles, 7 pole pairs: 350 eRPM/100 = 35000 eRPM = 5000 RPM = 83.3 rot/s.
+    let speed = bf_sensors([0.0; 3].map(DegPerSec::new), [350.0, 0.0, 1.0, 840.0].map(HundredErpm::new), CentiVolt::new(1680.0)).motor_rps;
     let tol = RotPerSec::new(1e-4);
-    assert!((speed[0] - RotPerSec::new(350.0 / 6.0)).abs() < tol, "got {:?}", speed[0]);
+    assert!((speed[0] - RotPerSec::new(5000.0 / 60.0)).abs() < tol, "got {:?}", speed[0]);
     assert_eq!(speed[1], RotPerSec::new(0.0));
-    assert!((speed[2] - RotPerSec::new(1.0 / 6.0)).abs() < RotPerSec::new(1e-7), "got {:?}", speed[2]);
+    assert!((speed[2] - RotPerSec::new(100.0 / 60.0 / 7.0)).abs() < RotPerSec::new(1e-6), "got {:?}", speed[2]);
     assert!((speed[3] - RotPerSec::new(200.0)).abs() < tol, "got {:?}", speed[3]);
 }
 
-/// A mechanical speed (dyn idle) and the eRPM telemetry of the same motor
-/// give the same model speed.
+/// The same eRPM is a slower shaft on a motor with more poles.
 #[test]
-fn mechanical_and_electrical_speeds_agree() {
-    // 14 poles: 5000 mechanical RPM = 35000 eRPM = 350 eRPM/100.
-    let mechanical = model_speed_from_mechanical(HundredRpm::new(50.0), 14);
-    let electrical = model_speed_from_erpm(HundredErpm::new(350.0));
-    assert!((mechanical - electrical).abs() < RotPerSec::new(1e-4), "{mechanical:?} vs {electrical:?}");
-    let erpm = erpm_from_mechanical(HundredRpm::new(50.0), 14);
-    assert_eq!(value!(erpm, 100 * rot / min, f32, Electrical), 350.0);
+fn shaft_speed_follows_the_pole_count() {
+    let erpm = HundredErpm::new(840.0);
+    let tol = RotPerSec::new(1e-4);
+    assert!((mechanical_from_erpm(erpm, 14) - RotPerSec::new(200.0)).abs() < tol);
+    assert!((mechanical_from_erpm(erpm, 12) - RotPerSec::new(1400.0 / 6.0)).abs() < tol);
+    // An unset pole count reads as one pole pair.
+    assert_eq!(mechanical_from_erpm(erpm, 0), mechanical_from_erpm(erpm, 2));
 }
 
 /// Telemetry leaves in the units BF logs it in: `pidData` floats per logged
@@ -154,7 +157,7 @@ fn mechanical_and_electrical_speeds_agree() {
 fn bf_telemetry_encoding() {
     let mut t = *ControllerState::new().telemetry();
     t.error_prop = [RotPerSec::new(1.0), RotPerSec::new(-0.5), RotPerSec::new(0.001)];
-    t.error_integral = [Rotation::new(0.25); 3];
+    t.error_integral_rate = [RotPerSec::new(0.25); 3];
     t.error_derivative = [RotPerSecSq::new(1.0); 3];
     t.feedback_v = [Volt::new(1.25), Volt::new(-0.0004), Volt::new(40.0), Volt::new(f32::NAN)];
     t.setpoint_rps = [RotPerSec::new(0.5); 3];
@@ -166,7 +169,7 @@ fn bf_telemetry_encoding() {
     let close = |a: f32, b: f32| (a - b).abs() < 1e-3 * b.abs().max(1.0);
     let p = bf.pid_p.map(|x| value!(x, 0.1 * deg / s, f32));
     assert!(close(p[0], 3600.0) && close(p[1], -1800.0) && close(p[2], 3.6), "{p:?}");
-    assert!(close(value!(bf.pid_i[0], 0.1 * deg, f32), 900.0));
+    assert!(close(value!(bf.pid_i[0], 0.1 * deg / s, f32), 900.0));
     assert!(close(value!(bf.pid_d[0], deg / s ^ 2, f32), 360.0));
 
     assert_eq!(bf.feedback.map(|v| value!(v, mV, i16)), [1250, 0, i16::MAX, 0]);
@@ -201,6 +204,7 @@ fn bf_accel_g_to_mps2() {
         motor_erpm: [HundredErpm::new(0.0); 4],
         battery: CentiVolt::new(0.0),
         accel_g: [0.0, -0.5, 1.0],
+        motor_poles: POLES,
     }
     .to_sensor_data()
     .accel
@@ -219,7 +223,8 @@ fn bf_sensor_data_layout() {
     assert_eq!(offset_of!(BfSensorData, motor_erpm), 12);
     assert_eq!(offset_of!(BfSensorData, battery), 28);
     assert_eq!(offset_of!(BfSensorData, accel_g), 32);
-    assert_eq!(size_of::<BfSensorData>(), 44);
+    assert_eq!(offset_of!(BfSensorData, motor_poles), 44);
+    assert_eq!(size_of::<BfSensorData>(), 48);
 }
 
 #[test]

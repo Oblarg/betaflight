@@ -217,3 +217,40 @@ fn quantized_ramp_is_followed() {
         assert!(shortfall_dps.abs() <= 1.0, "slew {slew:?} jerk {jerk:?}: target trails by {shortfall_dps} deg/s");
     }
 }
+
+/// `set_lambda` on a running estimator retunes it at the current link
+/// rate: after a stick step, a higher λ is closer to the step one packet on,
+/// the same as an estimator configured with that λ from the start.
+#[test]
+fn set_lambda_retunes_a_running_estimator() {
+    let (slew, jerk) = UNLIMITED;
+    let step = |t: Seconds| if t >= 10.0 * PERIOD { RotPerSec::new(1.0) } else { ZERO };
+    let after_step = |est: &mut SetpointEstimator| run(est, step, 11).0[0];
+
+    let mut fresh = SetpointEstimator::new();
+    fresh.configure(80.0, slew, jerk);
+    let mut retuned = SetpointEstimator::new();
+    retuned.configure(8.0, slew, jerk);
+    run(&mut retuned, |_| ZERO, 1);
+    retuned.set_lambda(80.0);
+    let mut kept = SetpointEstimator::new();
+    kept.configure(8.0, slew, jerk);
+
+    let (fresh, retuned, kept) = (after_step(&mut fresh), after_step(&mut retuned), after_step(&mut kept));
+    assert!((retuned - fresh).abs() <= RotPerSec::new(1e-5), "retuned={retuned:?} fresh={fresh:?}");
+    assert!(retuned > kept, "retuned={retuned:?} kept={kept:?}");
+}
+
+/// A λ of 0 (an unset setting) would freeze the estimate; it tracks with the
+/// default instead.
+#[test]
+fn zero_lambda_selects_the_default() {
+    let (slew, jerk) = UNLIMITED;
+    let step = |t: Seconds| if t >= 10.0 * PERIOD { RotPerSec::new(1.0) } else { ZERO };
+    let mut zero = SetpointEstimator::new();
+    zero.configure(8.0, slew, jerk);
+    zero.set_lambda(0.0);
+    let mut default = SetpointEstimator::new();
+    default.configure(8.0, slew, jerk);
+    assert_eq!(run(&mut zero, step, 12).0[0], run(&mut default, step, 12).0[0]);
+}

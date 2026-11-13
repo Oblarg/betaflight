@@ -8,13 +8,18 @@ around SITL.  Same model as tests/eval_setpoint_reconstruction.rs:
   roll'  = ρ_r·roll  + kT_r·Σ s_r·ω|ω|                  s_r = [w_L, w_L, −w_R, −w_R]
 
 Rates are model axes [yaw, pitch, roll] in rot/s; motor speeds are by BF
-motor index in the regression's unit, eRPM/600; V is duty × pack voltage.
+motor index in shaft rev/s; V is duty × pack voltage.
 """
 
 import json
 import math
 
 TWO_PI = 2.0 * math.pi
+
+
+def erpm_from_rps(rps, poles):
+    """Electrical RPM of a motor turning at `rps` shaft rev/s."""
+    return rps * 60.0 * poles / 2.0
 
 
 def arm_weights(coeffs, d_front=1.0, d_back=1.7, d_left=1.0, d_right=1.0):
@@ -31,6 +36,9 @@ class Plant:
     def __init__(self, coeffs_path, omega0=0.0):
         with open(coeffs_path) as f:
             c = json.load(f)
+        if c.get("motor_speed") != "shaft rev/s":
+            raise SystemExit(f"{coeffs_path}: fitted before motor speeds were in shaft rev/s; fit it again")
+        self.motor_poles = c["airframe"]["motor_poles"]
         w_f, w_b, w_l, w_r = arm_weights(c)
         self.k_alpha = c["motors"]["motorAccel"]
         self.k_w = c["motors"]["motorVel"]
@@ -82,4 +90,4 @@ class Plant:
         return (TWO_PI * roll, -TWO_PI * pitch, TWO_PI * yaw)
 
     def erpm(self):
-        return [600.0 * w for w in self.omega]
+        return [erpm_from_rps(w, self.motor_poles) for w in self.omega]

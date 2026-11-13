@@ -7,8 +7,10 @@ chain becomes one step.  The output JSON is what gen_wfg.py consumes, plus an
 "airframe" block taken from the log header.
 
     python3 fit_model.py fit LOG [LOG ...] -o coeffs.json [--dump CLI.txt]
+                             [--diagnostics diag.json] [--plots DIR]
     python3 fit_model.py validate coeffs.json LOG [LOG ...]
     python3 fit_model.py crossval LOG [LOG ...] [--dump CLI.txt] [-o pooled.json]
+    python3 fit_model.py flights FILE [FILE ...] [-o index.json]
 
 LOG is a blackbox file (every log in it is used), FILE#N for only its N-th
 log (1-based), or a Blackbox Explorer CSV export.
@@ -35,8 +37,8 @@ above the CG, so airspeed torques pitch and roll.  The fit can add the body
 x/y accelerometer (accSmooth, one-pole low-passed at DRAG_LP_HZ like the
 firmware) as pitch/roll regressors; auto keeps them on an axis only if they
 raise its held-out R² by DRAG_MIN_GAIN to at least DRAG_MIN_HELDOUT_R2.
-Held-out R² is pooled over folds that stay within one flight (a quarter
-held out, the rest of that flight trained on): props and motors change
+Held-out R² is pooled over folds that stay within one flight (a block of a
+quarter of its rows held out, the rest of that flight trained on): props and motors change
 between flights, and across flights the drag terms absorb that instead.
 The JSON's "drag" block records the axes kept; gen_wfg packs it into the
 v7 blob, and firmware built with the airframe-drag feature compensates it.
@@ -48,8 +50,9 @@ others, then per-flight coefficient spread and a motor-pairing check (each
 axis should be best explained by its own QUADX motor grouping).  --dump checks
 the CLI dump's mixer is the QUADX layout the regressors assume.
 
-Units follow main.R: rates in rot/s, motor speed in eRPM/600 (the unit the
-glue feeds the controller), volts from motor command × vbat.  --volts glue
+Units: rates in rot/s, motor speed in shaft rev/s (the eRPM telemetry over
+the log's motor_poles / 2, or --motor-poles, as the firmware reads it),
+volts from motor command × vbat.  --volts glue
 maps the motor command the way the glue drives it, (motor − 48)/1999, instead
 of main.R's motor/2047.
 """
@@ -104,6 +107,15 @@ STANDARD_GRAVITY = 9.80665
 DSHOT_MIN = 48
 DSHOT_MAX = 2047
 
+# The output's "motor_speed": the unit its motor speeds are in.  Fits
+# without it are in eRPM/600, which the consumers refuse.
+MOTOR_SPEED_UNIT = "shaft rev/s"
+
+
+def shaft_rps(erpm, poles):
+    """BF's eRPM/100 telemetry (the eRPM[i] log field) as shaft rev/s on a `poles`-pole motor."""
+    return erpm * (100.0 / 60.0) / (poles / 2.0)
+
 
 def _dilate(mask, t, before, after):
     """Samples within [event − before, event + after] of any True sample."""
@@ -124,10 +136,11 @@ def _runs(mask):
 class Flight:
     """One log's signals in model units, the usable-sample mask, and header metadata."""
 
-    def __init__(self, label, cols, header, selection="robust"):
+    def __init__(self, label, cols, header, selection="robust", motor_poles=None):
         self.label = label
         self.header = header
         self.selection = selection
+        self._poles = motor_poles
         t = (cols["time"] - cols["time"][0]) * 1e-6
         if selection == "r":
             keep = t < t.max() - TRIM_TAIL_S
@@ -174,9 +187,17 @@ class Flight:
     def rate(self, axis):
         return self.cols[f"gyroADC[{axis}]"] / 360.0
 
+    @property
+    def motor_poles(self):
+        """--motor-poles, else the log header's motor_poles."""
+        poles = self._poles or int(self.header.get("motor_poles", 0))
+        if poles < 2:
+            sys.exit(f"{self.label}: the log doesn't record motor_poles; pass --motor-poles")
+        return poles
+
     def motors(self):
-        """Motor speeds in main.R's naming: FL, BL, FR, BR = eRPM[0..3]."""
-        fl, bl, fr, br = (self.cols[f"eRPM[{i}]"] / 6.0 for i in range(4))
+        """Motor shaft speeds in main.R's naming: FL, BL, FR, BR = eRPM[0..3]."""
+        fl, bl, fr, br = (shaft_rps(self.cols[f"eRPM[{i}]"], self.motor_poles) for i in range(4))
         return fl, bl, fr, br
 
     def volts(self, mapping):
@@ -256,11 +277,11 @@ def split(flight, parts):
     return out
 
 
-def load_flights(spec, selection="robust"):
+def load_flights(spec, selection="robust", motor_poles=None):
     """Expand a LOG argument into gated Flights."""
     path, _, which = spec.partition("#")
     if path.lower().endswith(".csv"):
-        candidates = [Flight(os.path.basename(path), _cols_from_csv(path), {}, selection)]
+        candidates = [Flight(os.path.basename(path), _cols_from_csv(path), {}, selection, motor_poles)]
     else:
         candidates = []
         short = 0
@@ -274,7 +295,7 @@ def load_flights(spec, selection="robust"):
             cols = {name: log[name].astype(np.float64) for name in log.names}
             label = os.path.join(os.path.basename(os.path.dirname(os.path.abspath(path))),
                                  os.path.basename(path))
-            candidates.append(Flight(f"{label}#{n}", cols, log.header, selection))
+            candidates.append(Flight(f"{label}#{n}", cols, log.header, selection, motor_poles))
         if short:
             print(f"skipping {short} log(s) in {os.path.basename(path)} shorter than {MIN_DURATION_S:g} s",
                   file=sys.stderr)
@@ -435,6 +456,10 @@ def airframe(flights):
     h = next((f.header for f in flights if f.header), {})
     if not h:
         return {}
+    poles = sorted({f.motor_poles for f in flights})
+    if len(poles) > 1:
+        sys.exit(f"the flights were logged with different motor_poles {poles}; fit them separately "
+                 "or pass --motor-poles")
     looptime = int(h.get("looptime", 0))
     denom = int(h.get("pid_process_denom", 1))
     # Operating point for the evals, over the rows the fit kept (airborne).
@@ -451,11 +476,38 @@ def airframe(flights):
         "craft": h.get("Craft name", ""),
         "board": h.get("Board information", ""),
         "firmware": h.get("Firmware revision", ""),
-        "motor_poles": int(h.get("motor_poles", 14)),
+        "motor_poles": poles[0],
         "loop_hz": round(1e6 / (looptime * denom), 1) if looptime else None,
         "vbatcellvoltage": cellv,
         "gyro_lpf": gyro_lpf(h),
+        "rpm_lpf_hz": int(h.get("whippyflight_rpm_lpf_hz", RPM_LPF_HZ_DEFAULT)),
+        "stick_tracking": float(h.get("whippyflight_stick_tracking", STICK_TRACKING_DEFAULT)),
+        "idle_rps": int(h.get("whippyflight_idle_rps", 0)),
+        "stick_rates": stick_rates(h),
     }
+
+
+# The firmware's whippyflight_rpm_lpf_hz and whippyflight_stick_tracking
+# defaults, for logs that predate them (stock BF logs lack them too): what
+# the gains will fly with.
+RPM_LPF_HZ_DEFAULT = 50
+STICK_TRACKING_DEFAULT = 8
+
+
+RATE_KEYS = ("rc_rates", "rates", "rc_expo", "rate_limits")
+
+
+def stick_rates(h):
+    """
+    The rate profile from the log header, as BF logs it: `rates_type`, and
+    [roll, pitch, yaw] `rc_rates`, `rates` and `rc_expo` in hundredths and
+    `rate_limits` in deg/s.  None if the header lacks any of them.
+    """
+    if not all(k in h for k in RATE_KEYS):
+        return None
+    out = {"rates_type": int(h.get("rates_type", 0))}
+    out.update({k: [int(x) for x in h[k].split(",")][:3] for k in RATE_KEYS})
+    return out
 
 
 LPF_TYPES = {0: "PT1", 1: "BIQUAD", 2: "PT2", 3: "PT3"}
@@ -533,7 +585,7 @@ def pairing_check(flight):
     """
     n = flight.window("pitch")
     t = flight.t
-    w = [flight.cols[f"eRPM[{i}]"] / 6.0 for i in range(4)]
+    w = list(flight.motors())
     result = {}
     for axis, gyro in (("yaw", 2), ("pitch", 1), ("roll", 0)):
         rate = flight.rate(gyro)
@@ -577,7 +629,7 @@ def fit_arms(flights, arms, verbose=False, drag=()):
 def fit_coeffs(flights, arms, volts_map, verbose=False, drag=()):
     """Pooled fit over `flights`; returns the gen_wfg JSON dict (sans airframe)."""
     arms, arm_stats = fit_arms(flights, arms, verbose, drag)
-    out = {}
+    out = {"motor_speed": MOTOR_SPEED_UNIT}
     fit_stats = {}
     for axis in AXES:
         X, y, names = stack(flights, axis, arms, volts_map, drag)
@@ -618,9 +670,9 @@ def drag_axes(coeffs):
 def choose_drag(flights, mode, arms, volts_map):
     """
     Resolve --drag {auto,on,off} to the axes that get drag terms, with the
-    evidence for auto: per axis, the held-out R² gain from the terms
-    (row-weighted mean), leaving out one flight at a time (or one quarter of
-    a lone flight).
+    evidence for auto: per axis, the held-out R² with and without the terms,
+    pooled over folds that each hold out one of DRAG_FOLDS contiguous,
+    equal-row blocks of one flight's regression rows.
     """
     both = tuple(ARM_KEYS)
     if mode == "off":
@@ -633,37 +685,47 @@ def choose_drag(flights, mode, arms, volts_map):
         return both, None
     # Props and motors get swapped between flights (and after crashes, within
     # a day), which moves the thrust coefficients; across flights the drag
-    # terms soak that up.  So each fold holds out a quarter of one flight and
-    # trains on the rest of that flight only.
-    tasks = []
-    for f in flights:
-        chunks = split(f, DRAG_FOLDS)
-        tasks += [(held, chunks[:i] + chunks[i + 1:]) for i, held in enumerate(chunks)]
+    # terms soak that up.  So each fold holds out a block of one flight and
+    # trains on the rest of that flight only.  The blocks partition the
+    # flight's gated rows by count, not by time: excitation is bursty, and
+    # time quarters can leave a fold training on a few dozen rows.
     # Pooled over folds as 1 − ΣSSE/ΣSST, so quiet folds (tiny SST) can't
     # swing the result the way a mean of per-fold R² does.
     sse = {(axis, on): 0.0 for axis in both for on in (False, True)}
     sst = {axis: 0.0 for axis in both}
-    for held, train in tasks:
-        for drag in ((), both):
-            arms_k, _ = fit_arms(train, arms, drag=drag)
-            for axis in both:
-                X, y, _ = stack(train, axis, arms_k, volts_map, drag)
-                Xh, yh, _, _ = design(held, axis, arms_k, volts_map, drag)
-                resid = yh - Xh @ ols(X, y)[0]
-                sse[axis, bool(drag)] += float(resid @ resid)
-                if not drag:
-                    sst[axis] += float((yh - yh.mean()) @ (yh - yh.mean())) if len(yh) else 0.0
+    for f in flights:
+        for axis in both:
+            pos, neg = ARM_KEYS[axis]
+            # Gating depends only on the rate, so the no-drag rows are these
+            # rows minus the drag columns.
+            Xs, y, _, _ = design_split(f, axis, drag=True)
+            fold = np.arange(len(y)) * DRAG_FOLDS // max(len(y), 1)
+            for k in range(DRAG_FOLDS):
+                held = fold == k
+                if not held.any() or held.all():
+                    continue
+                yh = y[held]
+                sst[axis] += float((yh - yh.mean()) @ (yh - yh.mean()))
+                for on in (False, True):
+                    S = Xs if on else Xs[:, :3]
+                    if arms.get(pos) is not None and arms.get(neg) is not None:
+                        d_pos, d_neg = arms[pos], arms[neg]
+                    else:
+                        d_pos, d_neg = 1.0, fit_arm_ratio(S[~held], y[~held])[0]
+                    X = np.column_stack([S[:, 0], arm_regressor(S, d_pos, d_neg), S[:, 3:]])
+                    resid = yh - X[held] @ ols(X[~held], y[~held])[0]
+                    sse[axis, on] += float(resid @ resid)
     heldout = {a: {on: 1.0 - sse[a, on] / sst[a] if sst[a] else 0.0 for on in (False, True)} for a in both}
     axes = tuple(a for a in both if heldout[a][True] - heldout[a][False] > DRAG_MIN_GAIN
                  and heldout[a][True] >= DRAG_MIN_HELDOUT_R2)
     return axes, {"heldout_r2": {a: {"off": round(h[False], 4), "on": round(h[True], 4)}
                                  for a, h in heldout.items()},
-                      "folds": f"{DRAG_FOLDS} per flight × {len(flights)}"}
+                      "folds": f"{DRAG_FOLDS} equal-row blocks per flight × {len(flights)}"}
 
 
-def load_all(specs, jobs, selection="robust"):
+def load_all(specs, jobs, selection="robust", motor_poles=None):
     """Decode LOG arguments (in parallel across files) into Flights, in order."""
-    load = functools.partial(load_flights, selection=selection)
+    load = functools.partial(load_flights, selection=selection, motor_poles=motor_poles)
     if jobs > 1 and len(specs) > 1:
         from concurrent.futures import ProcessPoolExecutor
         with ProcessPoolExecutor(max_workers=jobs) as pool:
@@ -699,7 +761,7 @@ def write_json(path, data):
 
 
 def cmd_fit(args):
-    flights = load_all(args.logs, args.jobs, args.select)
+    flights = load_all(args.logs, args.jobs, args.select, args.motor_poles)
     if not flights:
         sys.exit("no usable flights")
     dump = read_dump(args.dump) if args.dump else None
@@ -710,16 +772,86 @@ def cmd_fit(args):
     if evidence:
         out["drag"]["selection"] = evidence
     out["airframe"] = airframe(flights)
+    poles = out["airframe"].get("motor_poles")
+    if dump and dump["motor_poles"] and poles and dump["motor_poles"] != poles:
+        print(f"warning: {os.path.basename(args.dump)} has motor_poles {dump['motor_poles']}, the fit "
+              f"{poles}; the flight controller must be set to the fit's", file=sys.stderr)
     if dump:
         out["airframe"].update(mixer=dump["mixer"], yaw_motors_reversed=dump["yaw_motors_reversed"],
                                dump=os.path.basename(args.dump))
     if args.output:
         write_json(args.output, out)
+    if args.diagnostics or args.plots:
+        import fit_diagnostics
+        diag = fit_diagnostics.diagnostics(flights, out, args.volts)
+        if args.diagnostics:
+            write_json(args.diagnostics, diag)
+        if args.plots:
+            for path in fit_diagnostics.plot(diag, args.plots):
+                print(f"wrote {path}", file=sys.stderr)
+
+
+def scan_log(path, selection="robust"):
+    """
+    Every log in a blackbox file, usable or not, with what a user picking
+    flights to fit wants to know: when, how long, how much of it is airborne
+    and impact-free, and how many seconds of each axis clear the excitation
+    gate (the rows a fit gets).
+    """
+    label = os.path.join(os.path.basename(os.path.dirname(os.path.abspath(path))), os.path.basename(path))
+    out = []
+    for n, log in enumerate(read_logs(path), 1):
+        t = log["time"]
+        entry = {"index": n, "duration_s": round(float((t[-1] - t[0]) * 1e-6), 1)}
+        start = log.header.get("Log start datetime", "")
+        if start and not start.startswith("0000"):
+            entry["start"] = start
+        if entry["duration_s"] < MIN_DURATION_S + (TRIM_TAIL_S if selection == "r" else 0.0):
+            entry["reason"] = f"shorter than {MIN_DURATION_S:g} s"
+            out.append(entry)
+            continue
+        if int(log.header.get("motor_poles", 0)) < 2:
+            entry["reason"] = "the log doesn't record motor_poles"
+            out.append(entry)
+            continue
+        cols = {name: log[name].astype(np.float64) for name in log.names}
+        flight = Flight(f"{label}#{n}", cols, log.header, selection)
+        excited = {}
+        for axis in ("yaw", "pitch", "roll"):
+            rows = len(design_split(flight, axis)[1] if axis in ARM_KEYS else design(flight, axis, {}, "r")[1])
+            excited[axis] = round(rows / flight.log_hz, 1)
+        entry.update(kept_s=round(flight.kept_s(), 1), log_hz=round(flight.log_hz, 1),
+                     gating={k: round(v, 1) for k, v in flight.gating.items()},
+                     excited_s=excited, reason=unusable(flight))
+        out.append(entry)
+    return out
+
+
+def cmd_flights(args):
+    """Index the logs in each file into a JSON keyed by file name, merged into -o if it exists."""
+    index = {}
+    if args.output and os.path.exists(args.output):
+        with open(args.output) as f:
+            index = json.load(f)
+    for path in args.logs:
+        name = os.path.basename(path)
+        try:
+            index[name] = {"size": os.path.getsize(path), "flights": scan_log(path, args.select)}
+        except Exception as e:  # a truncated or foreign file shouldn't sink the others
+            index[name] = {"size": os.path.getsize(path), "flights": [], "error": str(e)}
+        usable = sum(1 for f in index[name]["flights"] if not f.get("reason"))
+        print(f"{name}: {len(index[name]['flights'])} log(s), {usable} usable", file=sys.stderr)
+    if args.output:
+        write_json(args.output, index)
+    else:
+        json.dump(index, sys.stdout, indent=2)
 
 
 def cmd_validate(args):
     with open(args.coefficients) as f:
         coeffs = json.load(f)
+    if coeffs.get("motor_speed") != MOTOR_SPEED_UNIT:
+        sys.exit(f"{args.coefficients} was fitted before motor speeds were in {MOTOR_SPEED_UNIT}; fit it again")
 
     def arm(axis, key, override):
         value = override if override is not None else coeffs[axis].get(key, coeffs.get(key))
@@ -734,7 +866,7 @@ def cmd_validate(args):
     volts_map = coeffs.get("fit", {}).get("volts", args.volts)
     drag = drag_axes(coeffs)
     print_r2_table([(f, evaluate(coeffs, f, arms, volts_map), own_r2(f, volts_map, drag))
-                    for f in load_all(args.logs, args.jobs, args.select)], "given")
+                    for f in load_all(args.logs, args.jobs, args.select, args.motor_poles)], "given")
 
 
 def own_r2(flight, volts_map, drag=()):
@@ -755,7 +887,7 @@ def cmd_crossval(args):
     the others, next to its own best fit; then per-flight coefficient spread
     and the motor-pairing check.
     """
-    flights = load_all(args.logs, args.jobs, args.select)
+    flights = load_all(args.logs, args.jobs, args.select, args.motor_poles)
     if args.split > 1:
         flights = [part for f in flights for part in split(f, args.split)]
     if len(flights) < 2:
@@ -820,17 +952,26 @@ def main():
                        help="data selection: ground/impact gating, or main.R's exactly")
         p.add_argument("-j", "--jobs", type=int, default=os.cpu_count() or 1,
                        help="parallel log decoding")
+        p.add_argument("--motor-poles", type=int, default=None,
+                       help="the motors' pole count, if the logs' motor_poles setting was wrong")
         if name != "validate":
             p.add_argument("-o", "--output")
             p.add_argument("--dump", help="BF CLI diff/dump; checks the motor layout and records it")
+        if name == "fit":
+            p.add_argument("--diagnostics", help="write fit-quality diagnostics JSON (fit_diagnostics.py)")
+            p.add_argument("--plots", help="directory for fit-quality PNGs (needs matplotlib)")
             p.add_argument("--drag", choices=("auto", "on", "off"), default="auto",
                            help="airframe drag terms (accelerometer x/y on pitch/roll); "
                                 "auto keeps them if they improve held-out R²")
         if name == "crossval":
             p.add_argument("--split", type=int, default=1,
                            help="cut each flight into N contiguous chunks and cross-validate those")
+    p = sub.add_parser("flights", help="list every log in each file: duration, kept time, excitation")
+    p.add_argument("logs", nargs="+")
+    p.add_argument("--select", choices=("robust", "r"), default="robust")
+    p.add_argument("-o", "--output", help="JSON index to write (entries for other files are kept)")
     args = parser.parse_args()
-    {"fit": cmd_fit, "validate": cmd_validate, "crossval": cmd_crossval}[args.cmd](args)
+    {"fit": cmd_fit, "validate": cmd_validate, "crossval": cmd_crossval, "flights": cmd_flights}[args.cmd](args)
 
 
 if __name__ == "__main__":

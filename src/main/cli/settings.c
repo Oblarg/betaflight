@@ -123,6 +123,7 @@
 #include "pg/rcdevice.h"
 #include "pg/stats.h"
 #include "pg/board.h"
+#include "pg/whippyflight.h"
 
 #include "rx/a7105_flysky.h"
 #include "rx/cc2500_frsky_common.h"
@@ -2134,6 +2135,12 @@ const clivalue_t valueTable[] = {
     { PARAM_NAME_RPM_FILTER_MIN_HZ,        VAR_UINT8 | MASTER_VALUE, .config.minmaxUnsigned = { RPM_FILTER_MIN_HZ_MIN, RPM_FILTER_MIN_HZ_MAX }, PG_RPM_FILTER_CONFIG, offsetof(rpmFilterConfig_t, rpm_filter_min_hz) },
     { PARAM_NAME_RPM_FILTER_FADE_RANGE_HZ, VAR_UINT16 | MASTER_VALUE, .config.minmaxUnsigned = { 0, RPM_FILTER_FADE_RANGE_HZ_MAX }, PG_RPM_FILTER_CONFIG, offsetof(rpmFilterConfig_t, rpm_filter_fade_range_hz) },
     { PARAM_NAME_RPM_FILTER_LPF_HZ,        VAR_UINT16 | MASTER_VALUE, .config.minmaxUnsigned = { 100, 500 }, PG_RPM_FILTER_CONFIG, offsetof(rpmFilterConfig_t, rpm_filter_lpf_hz) },
+#endif
+#ifdef USE_WHIPPYFLIGHT
+    { PARAM_NAME_WHIPPYFLIGHT_ENABLED,     VAR_UINT8  | MASTER_VALUE | MODE_LOOKUP, .config.lookup = { TABLE_OFF_ON }, PG_WHIPPYFLIGHT_CONFIG, offsetof(whippyflightConfig_t, enabled) },
+    { PARAM_NAME_WHIPPYFLIGHT_RPM_LPF_HZ,  VAR_UINT16 | MASTER_VALUE, .config.minmaxUnsigned = { 0, WHIPPYFLIGHT_RPM_LPF_HZ_MAX }, PG_WHIPPYFLIGHT_CONFIG, offsetof(whippyflightConfig_t, rpm_lpf_hz) },
+    { PARAM_NAME_WHIPPYFLIGHT_STICK_TRACKING, VAR_UINT16 | MASTER_VALUE, .config.minmaxUnsigned = { WHIPPYFLIGHT_STICK_TRACKING_MIN, WHIPPYFLIGHT_STICK_TRACKING_MAX }, PG_WHIPPYFLIGHT_CONFIG, offsetof(whippyflightConfig_t, stick_tracking) },
+    { PARAM_NAME_WHIPPYFLIGHT_IDLE_RPS,    VAR_UINT16 | MASTER_VALUE, .config.minmaxUnsigned = { 0, WHIPPYFLIGHT_IDLE_RPS_MAX }, PG_WHIPPYFLIGHT_CONFIG, offsetof(whippyflightConfig_t, idle_rps) },
 #endif
 
 #ifdef USE_RX_FLYSKY

@@ -92,6 +92,7 @@
 #include "flight/position.h"
 #include "flight/rpm_filter.h"
 #include "flight/servos.h"
+#include "flight/whippyflight_msp.h"
 
 #include "io/asyncfatfs/asyncfatfs.h"
 #include "io/beeper.h"
@@ -5084,6 +5085,10 @@ RAM_CODE mspResult_e mspFcProcessCommand(mspDescriptor_t srcDesc, mspPacket_t *c
     } else if (cmdMSP == MSP_DATAFLASH_READ) {
         mspFcDataFlashReadCommand(dst, src);
         ret = MSP_RESULT_ACK;
+#endif
+#ifdef USE_WHIPPYFLIGHT
+    } else if ((ret = whippyflightMspProcess(cmdMSP, src, dst)) != MSP_RESULT_CMD_UNKNOWN) {
+        /* ret */;
 #endif
     } else {
         ret = mspCommonProcessInCommand(srcDesc, cmdMSP, src, mspPostProcessFn);

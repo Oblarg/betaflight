@@ -77,11 +77,12 @@ unsafe fn controller_ref() -> &'static ControllerState {
     unsafe { (*CONTROLLER.0.get()).assume_init_ref() }
 }
 
-/// Load gain data from a RAM buffer.  Called once at boot.
+/// Load gain data from a RAM buffer.  Called at boot, and again after a
+/// gain upload.
 ///
-/// The gain tables are read in place for the rest of the program, so
-/// `gains_buf` must point at static, 4-byte-aligned memory that is never
-/// rewritten (the glue's RAM copy of the dataflash gain partition).
+/// The gain tables are read in place until the next load, so `gains_buf`
+/// must point at static, 4-byte-aligned memory (the glue's RAM copy of the
+/// gain store) that is only rewritten after [`whippyflight_unload`].
 ///
 /// Returns 0 on success, nonzero on error (see [`GainLoadResult`]).
 #[unsafe(no_mangle)]
@@ -104,6 +105,14 @@ pub unsafe extern "C" fn whippyflight_init(
     }
 
     result
+}
+
+/// Stop reading the gain buffer, so the glue may rewrite it; the
+/// controller outputs zero duty until the next successful
+/// [`whippyflight_init`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn whippyflight_unload() {
+    unsafe { GAINS.get_mut() }.loaded = false;
 }
 
 /// Feed one RX packet to the setpoint estimator: the raw (unsmoothed) rate
@@ -139,13 +148,27 @@ pub unsafe extern "C" fn whippyflight_update(
     ctrl.update_with_target(sensors, &SetpointData { rate_rps, throttle }, target, gains)
 }
 
-/// Set the minimum linearization speed from BF's dynamic idle floor
-/// (`dyn_idle_min_rpm`, mechanical) on a `pole_count`-pole motor.  Reported
-/// motor speeds are clamped up to `max(speed, grid min_rps)` before gain
-/// lookup and the affine linearizer; gains diverge as ω → 0.
+/// Set the minimum linearization speed from the idle speed
+/// (`whippyflight_idle_rps`, shaft rev/s).  Reported motor speeds are
+/// clamped up to `max(speed, grid min_rps)` before gain lookup and the
+/// affine linearizer; gains diverge as ω → 0.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn whippyflight_set_min_speed(dyn_idle_min: HundredRpm, pole_count: u8) {
-    unsafe { controller_mut() }.set_min_rps(model_speed_from_mechanical(dyn_idle_min, pole_count));
+pub unsafe extern "C" fn whippyflight_set_min_speed(idle: RotPerSec) {
+    unsafe { controller_mut() }.set_min_rps(idle);
+}
+
+/// Set the cutoff of the low-pass on reported motor speeds
+/// (`whippyflight_rpm_lpf_hz`), Hz; 0 turns it off.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn whippyflight_set_motor_lpf(cutoff: Hertz) {
+    unsafe { controller_mut() }.set_motor_lpf(cutoff);
+}
+
+/// Set the stick setpoint estimator's tracking index λ at a 500 Hz link
+/// (`whippyflight_stick_tracking`).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn whippyflight_set_stick_tracking(lambda_500hz: f32) {
+    unsafe { SETPOINT.get_mut() }.set_lambda(lambda_500hz);
 }
 
 /// Reset all internal state.  Called on disarm.

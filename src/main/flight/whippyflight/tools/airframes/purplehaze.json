@@ -1,25 +1,26 @@
 {
+  "motor_speed": "shaft rev/s",
   "yaw": {
     "yawRate": -0.5718770968820077,
-    "propVelSumSq": 6.929846837529852e-05,
-    "propAccelSum": 0.0020843057996728664
+    "propVelSumSq": 3.3956249503896274e-05,
+    "propAccelSum": 0.0014590140597710063
   },
   "pitch": {
     "pitchRate": -0.7155124489439879,
-    "propVelSumSq": 0.0006728978111535552,
+    "propVelSumSq": 0.00032971992746524205,
     "dFront": 1.0,
     "dBack": 1.2431882839070314
   },
   "roll": {
     "rollRate": -1.0503624247727288,
-    "propVelSumSq": 0.0009061406012670474,
+    "propVelSumSq": 0.0004440088946208532,
     "dLeft": 1.0611796649949892,
     "dRight": 1.0
   },
   "motors": {
-    "motorVel": 0.044451149424854244,
-    "motorVelSq": 4.804569191389195e-05,
-    "motorAccel": 0.0013619116897268945
+    "motorVel": 0.03111580459739797,
+    "motorVelSq": 2.3542389037807055e-05,
+    "motorAccel": 0.0009533381828088261
   },
   "drag": {
     "axes": [],
@@ -96,7 +97,7 @@
   },
   "airframe": {
     "vbat_v": 22.49,
-    "hover_rps": 130.9,
+    "hover_rps": 187.0,
     "cells": 6,
     "craft": "PurpHaz",
     "board": "SPBE SPEEDYBEEF405V4",

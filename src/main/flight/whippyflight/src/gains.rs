@@ -49,6 +49,25 @@
 //! W is 12 for the gain tables and [`REF_FLOATS`] for the reference model;
 //! N⁴·W is always even, so every section stays 4-byte aligned.
 //!
+//! Version 8 stores the reference model per motor.  Each of its blocks
+//! depends on at most one motor's speed (the rate and motor-speed dynamics
+//! are diagonal and the plant is block-triangular, so column m of every
+//! rate ← speed or rate ← voltage block, and motor m's own decay and
+//! gain, follow motor m alone), so it is a 1D table over each motor's speed
+//! rather than an N⁴ one.  Multilinear interpolation of such a table is
+//! exactly the 1D interpolation, so nothing is approximated.  The
+//! quantization block's reference entry becomes:
+//!
+//! | Offset | Size    | Field           | Description                          |
+//! |--------|---------|-----------------|--------------------------------------|
+//! | ...    | 24      | ref constants   | `f32[6]` ad_rr, fh_rr (speed-free)   |
+//! | ...    | 352     | ref quant       | `f32[44]` lo, then `f32[44]` step    |
+//!
+//! and its table `u16[N × 4 × REF_MOTOR_SLOTS]`, indexed
+//! `[grid index · 4 + motor] · REF_MOTOR_SLOTS + slot` (see
+//! [`REF_MOTOR_SLOTS`]).  At N = 4 the blob is 25 848 bytes rather than
+//! ≈ 52 KB.
+//!
 //! Version 1 blobs have no affine block; the linearizer is then zero.
 //! Versions 1–2 have no reference model; `binv` is then a one-tick B⁻¹ and
 //! the controller falls back to `u_ff = B⁻¹·Δr`.  In v3+ `binv` is the
@@ -88,8 +107,11 @@ const GAIN_VERSION_V5: u16 = 5;
 /// Format version that adds the thrust balance.
 const GAIN_VERSION_V6: u16 = 6;
 
-/// Current format version: adds the airframe drag and target-limit blocks.
-const GAIN_VERSION: u16 = 7;
+/// Format version that adds the airframe drag and target-limit blocks.
+const GAIN_VERSION_V7: u16 = 7;
+
+/// Current format version: the reference model per motor.
+const GAIN_VERSION: u16 = 8;
 
 /// Floats per grid point in the reference-model table.
 ///
@@ -125,6 +147,45 @@ const GAIN_VERSION: u16 = 7;
 /// | 35     | `fh_rr` | 3     | h-tick free response, rate ← rate       |
 /// | 38     | `fh_rw` | 3×4   | h-tick free response, rate ← motor speed|
 pub const REF_FLOATS: usize = 50;
+
+/// Speed-independent reference-model floats (v8): `ad_rr` then `fh_rr`.
+pub const REF_CONST_FLOATS: usize = 6;
+
+/// Reference-model values per motor per grid speed (v8), from motor m's
+/// columns of the blocks in [`REF_FLOATS`]:
+///
+/// | Slot | Value          |
+/// |------|----------------|
+/// | 0–2  | `ad_rw[0..3][m]` |
+/// | 3    | `ad_ww[m]`     |
+/// | 4–6  | `bd_r[0..3][m]` |
+/// | 7    | `bd_w[m]`      |
+/// | 8–10 | `fh_rw[0..3][m]` |
+pub const REF_MOTOR_SLOTS: usize = 11;
+
+/// Width of the v8 reference table's rows: all motors at one grid speed.
+const REF_MOTOR_WIDTH: usize = 4 * REF_MOTOR_SLOTS;
+
+/// Assemble the [`REF_FLOATS`] slots from the v8 speed-free values and each
+/// motor's [`REF_MOTOR_SLOTS`] at its own speed.
+pub fn ref_slots_from_motors(
+    constant: &[f32; REF_CONST_FLOATS],
+    motors: &[[f32; REF_MOTOR_SLOTS]; 4],
+) -> [f32; REF_FLOATS] {
+    let mut r = [0.0f32; REF_FLOATS];
+    r[0..3].copy_from_slice(&constant[0..3]);
+    r[35..38].copy_from_slice(&constant[3..6]);
+    for (m, s) in motors.iter().enumerate() {
+        for i in 0..3 {
+            r[3 + 4 * i + m] = s[i];
+            r[19 + 4 * i + m] = s[4 + i];
+            r[38 + 4 * i + m] = s[8 + i];
+        }
+        r[15 + m] = s[3];
+        r[31 + m] = s[7];
+    }
+    r
+}
 
 /// The reference-model blocks of [`REF_FLOATS`] at one operating point,
 /// with their units.  Motor speeds and rates are both rot/s, so the
@@ -235,7 +296,7 @@ impl TargetLimits {
 }
 
 /// Floats in the hover block (v7): [hover rps, integral limit V] — the
-/// fitted airframe's median hover motor speed (model rps), for
+/// fitted airframe's median hover motor speed (shaft rev/s), for
 /// takeoff/landing detection, and the per-motor integral voltage that trims
 /// a generous CG offset at hover (gen_wfg `build_integral_limit`).  0 when
 /// unknown.
@@ -253,9 +314,9 @@ const fn table_floats(n: usize) -> usize {
     n * n * n * n * GAIN_SLOTS
 }
 
-/// Floats in the reference-model table at a given resolution.
-const fn ref_floats(n: usize) -> usize {
-    n * n * n * n * REF_FLOATS
+/// Values in the reference-model table at a given resolution.
+const fn ref_floats(n: usize, per_motor: bool) -> usize {
+    if per_motor { n * REF_MOTOR_WIDTH } else { n * n * n * n * REF_FLOATS }
 }
 
 /// Binary header size in bytes.
@@ -325,11 +386,16 @@ impl<E: TableEntry> GainTable<E> {
     /// Σ_v weight[v] · table[point[v]·W + i].  The weights must sum to 1:
     /// quantized tables sum the raw codes and apply lo/step once per slot.
     pub fn blend<const W: usize>(&self, point: &[usize], weight: &[f32]) -> [E; W] {
+        self.blend_slots::<W>(W, 0, point, weight)
+    }
+
+    /// [`Self::blend`] of the `K` slots from `first` in rows of `width`.
+    pub fn blend_slots<const K: usize>(&self, width: usize, first: usize, point: &[usize], weight: &[f32]) -> [E; K] {
         match self.data {
             TableData::F32(v) => {
-                let mut out = [E::default(); W];
+                let mut out = [E::default(); K];
                 for (&p, &w) in point.iter().zip(weight) {
-                    let row = &v[p * W..p * W + W];
+                    let row = &v[p * width + first..p * width + first + K];
                     for (o, &x) in out.iter_mut().zip(row) {
                         *o = *o + x * w;
                     }
@@ -337,14 +403,14 @@ impl<E: TableEntry> GainTable<E> {
                 out
             }
             TableData::U16 { q, lo, step } => {
-                let mut code = [0.0f32; W];
+                let mut code = [0.0f32; K];
                 for (&p, &w) in point.iter().zip(weight) {
-                    let row = &q[p * W..p * W + W];
+                    let row = &q[p * width + first..p * width + first + K];
                     for (o, &x) in code.iter_mut().zip(row) {
                         *o += w * x as f32;
                     }
                 }
-                core::array::from_fn(|i| lo[i] + step[i] * code[i])
+                core::array::from_fn(|i| lo[first + i] + step[first + i] * code[i])
             }
         }
     }
@@ -378,11 +444,16 @@ pub struct GainStorage {
     pub kp: GainTable<VoltPerRps>,
     pub binv: GainTable<VoltPerRps>,
 
-    /// Reference-model table, [grid point] * REF_FLOATS + offset; empty
-    /// when the blob has none (v1–v2).
+    /// Reference-model table: v3–v7 [grid point] * REF_FLOATS + offset,
+    /// v8 per motor (see [`REF_MOTOR_SLOTS`]); empty when the blob has none
+    /// (v1–v2).
     pub ref_model: GainTable<f32>,
     /// Whether `ref_model` was present in the blob (v3+).
     pub has_ref_model: bool,
+    /// Whether `ref_model` is per motor (v8).
+    pub ref_per_motor: bool,
+    /// The reference model's speed-free values (v8), see [`REF_CONST_FLOATS`].
+    pub ref_const: [f32; REF_CONST_FLOATS],
 
     /// Affine linearizer G, row-major [motor][signed-square motor]:
     /// u_aff = G · ω|ω|.  Constant over the grid.
@@ -402,7 +473,7 @@ pub struct GainStorage {
     /// before v7.
     pub target_limits: TargetLimits,
 
-    /// Hover motor speed (model rps), see [`HOVER_FLOATS`].  0 before v7.
+    /// Hover motor speed (shaft rev/s), see [`HOVER_FLOATS`].  0 before v7.
     pub hover_rps: RotPerSec,
     /// Per-motor integral voltage bound, see [`HOVER_FLOATS`].  0 before v7.
     pub integral_limit_v: Volt,
@@ -427,6 +498,8 @@ impl GainStorage {
             binv: GainTable::EMPTY,
             ref_model: GainTable::EMPTY,
             has_ref_model: false,
+            ref_per_motor: false,
+            ref_const: [0.0; REF_CONST_FLOATS],
             affine: [VoltPerRpsSq::new(0.0); AFFINE_FLOATS],
             motor_drag: MotorDrag::ZERO,
             thrust_balance: [1.0; BALANCE_FLOATS],
@@ -542,7 +615,8 @@ pub fn load_gains(data: &'static [u8], storage: &mut GainStorage) -> GainLoadRes
     let has_motor = version >= GAIN_VERSION_V4;
     let quantized = version >= GAIN_VERSION_V5;
     let has_balance = version >= GAIN_VERSION_V6;
-    let has_drag = version >= GAIN_VERSION;
+    let has_drag = version >= GAIN_VERSION_V7;
+    let per_motor = version >= GAIN_VERSION;
 
     let resolution = data[0x06] as usize;
     if resolution > MAX_RESOLUTION || resolution == 0 {
@@ -551,13 +625,14 @@ pub fn load_gains(data: &'static [u8], storage: &mut GainStorage) -> GainLoadRes
 
     let floats_per_table = table_floats(resolution);
     let affine_floats = if has_affine { AFFINE_FLOATS } else { 0 };
-    let ref_count = if has_ref_model { ref_floats(resolution) } else { 0 };
+    let ref_count = if has_ref_model { ref_floats(resolution, per_motor) } else { 0 };
     let motor_floats = if has_motor { MOTOR_FLOATS } else { 0 }
         + if has_balance { BALANCE_FLOATS } else { 0 }
         + if has_drag { DRAG_FLOATS + TARGET_FLOATS + HOVER_FLOATS } else { 0 };
     let table_values = 4 * floats_per_table + ref_count;
     let body_bytes = if quantized {
-        let quant_floats = 2 * (4 * GAIN_SLOTS + REF_FLOATS);
+        let quant_floats = 2 * 4 * GAIN_SLOTS
+            + if per_motor { REF_CONST_FLOATS + 2 * REF_MOTOR_WIDTH } else { 2 * REF_FLOATS };
         (quant_floats + affine_floats + motor_floats) * 4 + table_values * 2
     } else {
         (table_values + affine_floats + motor_floats) * 4
@@ -595,7 +670,11 @@ pub fn load_gains(data: &'static [u8], storage: &mut GainStorage) -> GainLoadRes
         let kd_q = cur.quant(GAIN_SLOTS);
         let kp_q = cur.quant(GAIN_SLOTS);
         let binv_q = cur.quant(GAIN_SLOTS);
-        let ref_q = cur.quant(REF_FLOATS);
+        storage.ref_const = [0.0; REF_CONST_FLOATS];
+        if per_motor {
+            storage.ref_const.copy_from_slice(cur.take(REF_CONST_FLOATS));
+        }
+        let ref_q = cur.quant(if per_motor { REF_MOTOR_WIDTH } else { REF_FLOATS });
         storage.affine.copy_from_slice(cur.take(AFFINE_FLOATS));
         storage.motor_drag = MotorDrag { k_w: cur.one(), k_w2: cur.one() };
         storage.thrust_balance = [1.0; BALANCE_FLOATS];
@@ -633,6 +712,7 @@ pub fn load_gains(data: &'static [u8], storage: &mut GainStorage) -> GainLoadRes
         storage.kp = table(&mut cur, floats_per_table);
         storage.binv = table(&mut cur, floats_per_table);
         storage.ref_model = table(&mut cur, ref_count);
+        storage.ref_const = [0.0; REF_CONST_FLOATS];
         storage.affine = [VoltPerRpsSq::new(0.0); AFFINE_FLOATS];
         if has_affine {
             storage.affine.copy_from_slice(cur.take(AFFINE_FLOATS));
@@ -649,6 +729,7 @@ pub fn load_gains(data: &'static [u8], storage: &mut GainStorage) -> GainLoadRes
     }
 
     storage.has_ref_model = has_ref_model;
+    storage.ref_per_motor = per_motor;
 
     storage.loaded = true;
     GainLoadResult::Ok

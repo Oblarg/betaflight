@@ -3,7 +3,7 @@
 Float64 reference for test_real_gains.rs's stick-flick feedforward tests.
 
 Runs the controller's reference-model feedforward (u_ff = G_h⁺·(r + h·Δr −
-F_h·δx), δx ← Ad·δx + Bd·u_ff, |u| ≤ Vbat) at a uniform 275 rps operating
+F_h·δx), δx ← Ad·δx + Bd·u_ff, |u| ≤ Vbat) at a uniform 460 rev/s operating
 point straight from gen_wfg's model, for the tests' FLICK_RPS flick (linear
 over 30 ms, PT3-smoothed at 190 Hz), and prints the peak and settled
 feedforward voltages.  The tests compare the blob (quantized, interpolated,
@@ -23,7 +23,7 @@ import numpy as np
 import gen_wfg
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-OMEGA = 275.0
+OMEGA = 460.0
 DT = 0.00025
 HORIZON = 8
 BATTERY_V = 16.8

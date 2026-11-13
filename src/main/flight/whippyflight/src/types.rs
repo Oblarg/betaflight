@@ -12,7 +12,7 @@
 //! |----------------|-------------|---------------------------------|
 //! | Angular rate   | rot/s       | deg/s ([`DegPerSec`])           |
 //! | Voltage        | V (f32)     | centivolts ([`CentiVolt`])      |
-//! | Motor speed    | model rot/s | eRPM/100 ([`HundredErpm`]), RPM/100 ([`HundredRpm`]) |
+//! | Motor speed    | shaft rot/s | eRPM/100 ([`HundredErpm`]) and `motor_poles` |
 //! | RX rate        | period (s)  | Hz ([`Hertz`])                  |
 //! | Motor output   | duty [0,1]  | DShot 48–2047                   |
 //! | Throttle       | [0, 1]      | [0, 1] (same)                   |
@@ -22,7 +22,7 @@
 //! and hands telemetry back in the units BF logs it in ([`BfTelemetry`]), so
 //! the C glue copies values through unconverted and every conversion happens
 //! here.  Electrical and mechanical motor speeds carry different brands
-//! ([`Electrical`], [`Mechanical`]), and neither mixes with the model's.
+//! ([`Electrical`]), and doesn't mix with the shaft speeds the model uses.
 //!
 //! # Axis ordering
 //!
@@ -83,35 +83,16 @@ pub type CentiVolt = qty!(cV, f32);
 #[derive(Clone, Copy)]
 pub struct Electrical;
 
-/// Brand of a mechanical (shaft) motor speed.
-#[derive(Clone, Copy)]
-pub struct Mechanical;
-
 /// BF's DShot telemetry speed, eRPM/100 (`getDshotErpm`).
 pub type HundredErpm = qty!(100 * rot / min, f32, Electrical);
 
-/// BF's mechanical speed count, RPM/100 (`dyn_idle_min_rpm`).
-pub type HundredRpm = qty!(100 * rot / min, f32, Mechanical);
-
-/// Pole pairs of the motor whose mechanical rot/s is the model's motor speed
-/// unit.  The regression (main.R) defines motor speed as the blackbox eRPM/100
-/// field divided by 6, i.e. eRPM/600 = (electrical rot/s) / 10, whatever the
-/// actual pole count; the fitted coefficients and gain grid are in this unit.
-pub const MODEL_POLE_PAIRS: f32 = 10.0;
-
-/// Model motor speed from electrical (eRPM) telemetry.
-pub fn model_speed_from_erpm(erpm: HundredErpm) -> RotPerSec {
-    RotPerSec::new(value!(erpm, rot / s, f32, Electrical) / MODEL_POLE_PAIRS)
-}
-
-/// Electrical speed of a `pole_count`-pole motor turning at `rpm`.
-pub fn erpm_from_mechanical(rpm: HundredRpm, pole_count: u8) -> HundredErpm {
-    HundredErpm::new(value!(rpm, 100 * rot / min, f32, Mechanical) * (pole_count as f32 / 2.0))
-}
-
-/// Model motor speed from a mechanical speed on a `pole_count`-pole motor.
-pub fn model_speed_from_mechanical(rpm: HundredRpm, pole_count: u8) -> RotPerSec {
-    model_speed_from_erpm(erpm_from_mechanical(rpm, pole_count))
+/// Shaft speed of a `pole_count`-pole motor (`motor_poles`) from its
+/// electrical (eRPM) telemetry.  The model's motor speeds, the fitted
+/// coefficients and the gain grid are all in shaft rot/s.  A pole count
+/// below 2 (unset) reads as 2: electrical speed itself.
+pub fn mechanical_from_erpm(erpm: HundredErpm, pole_count: u8) -> RotPerSec {
+    let pole_pairs = pole_count.max(2) as f32 / 2.0;
+    RotPerSec::new(value!(erpm, rot / s, f32, Electrical) / pole_pairs)
 }
 
 // ---------------------------------------------------------------------------
@@ -123,10 +104,8 @@ pub fn model_speed_from_mechanical(rpm: HundredRpm, pole_count: u8) -> RotPerSec
 // with the same `[unit:…]`.
 // ---------------------------------------------------------------------------
 
-/// `pidData` P (rate error): 0.1 deg/s per logged count.
+/// `pidData` P (rate error) and I (integral state over dt): 0.1 deg/s per logged count.
 pub type DeciDegPerSec = qty!(0.1 * deg / s, f32);
-/// `pidData` I (integrated rate error): 0.1 deg per logged count.
-pub type DeciDeg = qty!(0.1 * deg, f32);
 /// `pidData` D (filtered rate-error derivative): 1 deg/s² per logged count.
 pub type DegPerSecSq = qty!(deg / s ^ 2, f32);
 
@@ -161,7 +140,7 @@ pub type DerivativeAxes = dims![rot / s ^ 2, rot / s ^ 2, rot / s ^ 2];
 /// Motor voltage outputs: [REAR_R, FRONT_R, REAR_L, FRONT_L] in V.
 pub type MotorAxes = dims![V, V, V, V];
 
-/// Motor speeds: one per motor, in rot/s (model units).
+/// Motor speeds: one per motor, in shaft rot/s.
 pub type MotorSpeedAxes = dims![rot / s, rot / s, rot / s, rot / s];
 
 /// Signed squared motor speeds ω|ω|: one per motor, in rot²/s².
@@ -221,7 +200,7 @@ pub type SetpointDiffVec = MixedUnitMatrix<AttitudeAxes, Scalar, SMatrix<f32, 3,
 /// Motor voltage vector: 4 motor voltages in V.
 pub type MotorVoltageVec = MixedUnitMatrix<MotorAxes, Scalar, SMatrix<f32, 4, 1>>;
 
-/// Motor speed deviation vector in rot/s (model units).
+/// Motor speed deviation vector in shaft rot/s.
 pub type MotorSpeedVec = MixedUnitMatrix<MotorSpeedAxes, Scalar, SMatrix<f32, 4, 1>>;
 
 /// Signed squared motor speed vector ω|ω| in rot²/s².
@@ -231,7 +210,7 @@ pub type MotorSpeedSqVec = MixedUnitMatrix<MotorSpeedSqAxes, Scalar, SMatrix<f32
 // Scalar quantity aliases
 // ---------------------------------------------------------------------------
 
-/// A rotation rate in rot/s (also motor speed, in model units).
+/// A rotation rate in rot/s (also motor shaft speed).
 pub type RotPerSec = qty!(rot / s, f32);
 /// A rotation (integrated angle) in rot.
 pub type Rotation = qty!(rot, f32);
@@ -336,6 +315,8 @@ pub struct BfSensorData {
     /// docs): [x, y, z] (BF accelerometer axes), `acc.accADC[i] /
     /// acc.dev.acc_1G`.  Zero without an accelerometer.
     pub accel_g: [f32; 3],
+    /// `motorConfig()->motorPoleCount`, which turns `motor_erpm` into shaft speeds.
+    pub motor_poles: u8,
 }
 
 impl BfSensorData {
@@ -343,7 +324,7 @@ impl BfSensorData {
     pub fn to_sensor_data(&self) -> SensorData {
         SensorData {
             gyro_rps: self.gyro.map(rescale_f32),
-            motor_rps: self.motor_erpm.map(model_speed_from_erpm),
+            motor_rps: self.motor_erpm.map(|e| mechanical_from_erpm(e, self.motor_poles)),
             battery_voltage: rescale_f32(self.battery),
             accel: self.accel_g.map(accel_from_g),
         }
@@ -359,8 +340,7 @@ impl BfSensorData {
 pub struct SensorData {
     /// Gyro rates: [roll, pitch, yaw].
     pub gyro_rps: [RotPerSec; 3],
-    /// Motor speeds in the model's unit (see [`MODEL_POLE_PAIRS`]), by BF
-    /// motor index.
+    /// Motor shaft speeds, by BF motor index.
     pub motor_rps: [RotPerSec; 4],
     /// Battery voltage.
     pub battery_voltage: Volt,
@@ -417,6 +397,9 @@ pub struct LqrTelemetry {
     pub error_prop: [RotPerSec; 3],
     /// Integral error state: [roll, pitch, yaw] in rot.
     pub error_integral: [Rotation; 3],
+    /// The integral state over the loop period, e_int/dt: the rate error
+    /// low-passed over the integral's time constant, in rot/s.
+    pub error_integral_rate: [RotPerSec; 3],
     /// Derivative error state: [roll, pitch, yaw] in rot/s².
     pub error_derivative: [RotPerSecSq; 3],
     /// Interpolated Kp diagonal (motor 0 / REAR_R): [roll, pitch, yaw].
@@ -440,7 +423,7 @@ impl LqrTelemetry {
         let debug_rate = |r: RotPerSec| -> DebugDeciDps { to_debug(rescale_f32(r)) };
         BfTelemetry {
             pid_p: self.error_prop.map(rescale_f32),
-            pid_i: self.error_integral.map(rescale_f32),
+            pid_i: self.error_integral_rate.map(rescale_f32),
             pid_d: self.error_derivative.map(rescale_f32),
             feedback: self.feedback_v.map(|v| to_debug(rescale_f32(v))),
             raw_setpoint: raw_setpoint.map(debug_rate),
@@ -463,8 +446,9 @@ impl LqrTelemetry {
 pub struct BfTelemetry {
     /// `pidData[axis].P` and `.Sum`: rate error.
     pub pid_p: [DeciDegPerSec; 3],
-    /// `pidData[axis].I`: integral of the rate error.
-    pub pid_i: [DeciDeg; 3],
+    /// `pidData[axis].I`: the integral state over the loop period (the
+    /// state itself, a fraction of a degree, would log as 0).
+    pub pid_i: [DeciDegPerSec; 3],
     /// `pidData[axis].D`: filtered derivative of the rate error.
     pub pid_d: [DegPerSecSq; 3],
     /// `DEBUG_NONE` 0–3: per-motor feedback voltage.

@@ -18,6 +18,8 @@
 #include <stdio.h>
 #endif
 
+#include "blackbox/blackbox.h"
+
 #include "build/debug.h"
 
 #include "common/axis.h"
@@ -48,6 +50,7 @@
 
 #include "pg/motor.h"
 #include "pg/sdcard.h"
+#include "pg/whippyflight.h"
 
 #include "sensors/acceleration.h"
 #include "sensors/battery.h"
@@ -138,6 +141,7 @@ void whippyflightPidAndMotorUpdate(timeUs_t currentTimeUs)
             getMotorErpm(3),
         },
         .battery = getBatteryCentivolts(),
+        .motor_poles = motorConfig()->motorPoleCount,
     };
     getAccelG(sensors.accel_g);
 
@@ -159,7 +163,9 @@ void whippyflightPidAndMotorUpdate(timeUs_t currentTimeUs)
     // 3. Run the Rust LQR controller.
     // -----------------------------------------------------------------------
 
-    whippyflight_set_min_speed(currentPidProfile->dyn_idle_min_rpm, motorConfig()->motorPoleCount);
+    whippyflight_set_min_speed(whippyflightConfig()->idle_rps);
+    whippyflight_set_motor_lpf(whippyflightConfig()->rpm_lpf_hz);
+    whippyflight_set_stick_tracking(whippyflightConfig()->stick_tracking * 0.01f);
     const wf_control_output_t output = whippyflight_update(&sensors, rcCommand[THROTTLE], currentTimeUs);
 
     // -----------------------------------------------------------------------
@@ -221,7 +227,7 @@ void whippyflightPidAndMotorUpdate(timeUs_t currentTimeUs)
     //    infrastructure logs it without modification.  The semantics differ
     //    from BF's PID, but the fields are still useful for tuning:
     //      P = per-axis rate error (0.1 deg/s)
-    //      I = per-axis integrated rate error (0.1 deg)
+    //      I = per-axis integral state / dt: the low-passed rate error (0.1 deg/s)
     //      D = per-axis rate-error derivative (deg/s²)
     //      F = 0 (feedforward is per-motor in our system)
     //    Motor[] is already populated above.  The Rust side encodes every
@@ -303,6 +309,8 @@ void whippyflightPidAndMotorUpdate(timeUs_t currentTimeUs)
 
 static uint8_t wfGainRam[WHIPPYFLIGHT_GAIN_STORE_SIZE] __attribute__((aligned(4)));
 static wf_gain_load_result_t wfGainResult = WF_GAIN_NO_STORE;
+static wf_gain_source_t wfGainSource = WF_GAIN_SOURCE_NONE;
+static uint32_t wfGainSize;
 static float wfGainDt;
 
 // Validate the header at the start of wfGainRam, given how many bytes the
@@ -410,6 +418,21 @@ static wf_gain_load_result_t loadGainsFromSdCard(uint32_t *blobSize)
 #endif
 
 #ifdef USE_FLASH_CHIP
+// The dataflash gain partition: byte address and usable size (capped at the
+// gain RAM).  False if the board has none.
+static bool gainPartition(uint32_t *base, uint32_t *capacity)
+{
+    const flashPartition_t *partition = flashPartitionFindByType(FLASH_PARTITION_TYPE_WHIPPYFLIGHT);
+    const flashGeometry_t *geometry = flashGetGeometry();
+    if (!partition || geometry->totalSize == 0) {
+        return false;
+    }
+    *base = partition->startSector * geometry->sectorSize;
+    *capacity = MIN(FLASH_PARTITION_SECTOR_COUNT(partition) * geometry->sectorSize,
+                    (uint32_t)sizeof(wfGainRam));
+    return true;
+}
+
 static bool readGainFlash(uint32_t address, uint8_t *buffer, uint32_t length)
 {
     while (length > 0) {
@@ -428,15 +451,10 @@ static bool readGainFlash(uint32_t address, uint8_t *buffer, uint32_t length)
 static wf_gain_load_result_t loadGainsFromFlash(uint32_t *blobSize)
 {
 #ifdef USE_FLASH_CHIP
-    const flashPartition_t *partition = flashPartitionFindByType(FLASH_PARTITION_TYPE_WHIPPYFLIGHT);
-    const flashGeometry_t *geometry = flashGetGeometry();
-    if (!partition || geometry->totalSize == 0) {
+    uint32_t base, capacity;
+    if (!gainPartition(&base, &capacity)) {
         return WF_GAIN_NO_STORE;
     }
-
-    const uint32_t base = partition->startSector * geometry->sectorSize;
-    const uint32_t capacity = MIN(FLASH_PARTITION_SECTOR_COUNT(partition) * geometry->sectorSize,
-                                  (uint32_t)sizeof(wfGainRam));
 
     if (!readGainFlash(base, wfGainRam, WF_GAIN_HEADER_SIZE)) {
         return WF_GAIN_TOO_SHORT;
@@ -456,53 +474,235 @@ static wf_gain_load_result_t loadGainsFromFlash(uint32_t *blobSize)
 #endif
 }
 
-wf_gain_load_result_t whippyflightLoadGains(void)
+// Hand the blob staged in wfGainRam to the controller and record the outcome.
+static wf_gain_load_result_t initGains(wf_gain_load_result_t result, uint32_t blobSize, wf_gain_source_t source)
 {
-    uint32_t blobSize = 0;
-    const char *source = "sdcard";
-    wf_gain_load_result_t result = WF_GAIN_NO_STORE;
-#ifdef USE_SDCARD
-    result = loadGainsFromSdCard(&blobSize);
-#endif
-    if (result == WF_GAIN_NO_STORE) {
-        source = "dataflash";
-        result = loadGainsFromFlash(&blobSize);
-    }
     if (result == WF_GAIN_OK) {
         result = whippyflight_init(wfGainRam, blobSize);
     }
     if (result == WF_GAIN_OK) {
         memcpy(&wfGainDt, wfGainRam + WF_GAIN_DT_OFFSET, sizeof(wfGainDt));
+        wfGainSize = blobSize;
     } else {
-        blobSize = 0;
+        wfGainSize = 0;
     }
     wfGainResult = result;
+    wfGainSource = source;
+    return result;
+}
+
+static bool wfActive;
+
+void whippyflightInit(void)
+{
+    wfActive = whippyflightConfig()->enabled;
+    whippyflightLoadGains();
+}
+
+bool whippyflightIsActive(void)
+{
+    return wfActive;
+}
+
+wf_gain_load_result_t whippyflightLoadGains(void)
+{
+    whippyflight_unload();
+    uint32_t blobSize = 0;
+    wf_gain_source_t source = WF_GAIN_SOURCE_SDCARD;
+    wf_gain_load_result_t result = WF_GAIN_NO_STORE;
+#ifdef USE_SDCARD
+    result = loadGainsFromSdCard(&blobSize);
+#endif
+    if (result == WF_GAIN_NO_STORE) {
+        source = WF_GAIN_SOURCE_DATAFLASH;
+        result = loadGainsFromFlash(&blobSize);
+    }
+    result = initGains(result, blobSize, source);
 #ifdef SIMULATOR_BUILD
-    printf("[WHIPPYFLIGHT] gain load from %s: result=%d, %u bytes\n", source, (int)result, (unsigned)blobSize);
-#else
-    UNUSED(source);
+    printf("[WHIPPYFLIGHT] gain load from %s: result=%d, %u bytes\n",
+           source == WF_GAIN_SOURCE_SDCARD ? "sdcard" : "dataflash", (int)result, (unsigned)wfGainSize);
 #endif
     return result;
 }
 
-const char *whippyflightArmingBlockReason(void)
+// ---------------------------------------------------------------------------
+// Gain upload.
+// ---------------------------------------------------------------------------
+
+static bool wfUploading;
+static uint32_t wfUploadSize;
+static uint32_t wfUploadReceived;
+
+void whippyflightGainStatus(wf_gain_status_t *status)
 {
-    if (wfGainResult != WF_GAIN_OK) {
-        return "gains not loaded";
+    status->result = wfGainResult;
+    status->source = wfGainSource;
+    status->blobSize = wfGainSize;
+    status->blobCrc = 0;
+    status->blobDt = 0.0f;
+    if (wfGainSize > 0) {
+        memcpy(&status->blobCrc, wfGainRam + wfGainSize - 4, sizeof(status->blobCrc));
+        status->blobDt = wfGainDt;
     }
-    // The gains are discretised at the blob's dt.
-    const float pidDt = pidGetDT();
-    if (fabsf(pidDt - wfGainDt) > WF_GAIN_DT_TOLERANCE * wfGainDt) {
-        return "PID loop rate does not match gain blob dt";
+    status->partitionSize = 0;
+#ifdef USE_FLASH_CHIP
+    uint32_t base;
+    if (!gainPartition(&base, &status->partitionSize)) {
+        status->partitionSize = 0;
+    }
+#endif
+    status->uploading = wfUploading;
+    status->uploadSize = wfUploadSize;
+    status->uploadReceived = wfUploadReceived;
+}
+
+wf_upload_result_t whippyflightUploadBegin(uint32_t size)
+{
+    if (ARMING_FLAG(ARMED)) {
+        return WF_UPLOAD_ARMED;
+    }
+#ifdef USE_FLASH_CHIP
+    uint32_t base, capacity;
+    if (!gainPartition(&base, &capacity)) {
+        return WF_UPLOAD_NO_STORE;
+    }
+    if (size > capacity) {
+        return WF_UPLOAD_TOO_LARGE;
+    }
+    if (size < WF_GAIN_HEADER_SIZE + 4) {
+        return WF_UPLOAD_INCOMPLETE;
+    }
+    // The staged blob overwrites the tables the controller reads in place.
+    whippyflight_unload();
+    wfGainResult = WF_GAIN_NO_STORE;
+    wfGainSize = 0;
+    wfUploading = true;
+    wfUploadSize = size;
+    wfUploadReceived = 0;
+    return WF_UPLOAD_OK;
+#else
+    UNUSED(size);
+    return WF_UPLOAD_NO_STORE;
+#endif
+}
+
+wf_upload_result_t whippyflightUploadData(uint32_t offset, const uint8_t *data, uint32_t length)
+{
+    if (ARMING_FLAG(ARMED)) {
+        return WF_UPLOAD_ARMED;
+    }
+    if (!wfUploading) {
+        return WF_UPLOAD_NOT_STARTED;
+    }
+    if (offset != wfUploadReceived || length > wfUploadSize - wfUploadReceived) {
+        return WF_UPLOAD_OUT_OF_ORDER;
+    }
+    memcpy(wfGainRam + offset, data, length);
+    wfUploadReceived += length;
+    return WF_UPLOAD_OK;
+}
+
+void whippyflightUploadAbort(void)
+{
+    if (wfUploading) {
+        wfUploading = false;
+        whippyflightLoadGains();
+    }
+}
+
+#ifdef USE_FLASH_CHIP
+// Erase the sectors the blob occupies, program it page by page, and read it
+// back against the RAM copy.
+static bool writeGainFlash(uint32_t base, uint32_t size)
+{
+    const flashGeometry_t *geometry = flashGetGeometry();
+    for (uint32_t offset = 0; offset < size; offset += geometry->sectorSize) {
+        flashEraseSector(base + offset);
+    }
+    for (uint32_t offset = 0; offset < size; offset += geometry->pageSize) {
+        flashPageProgram(base + offset, wfGainRam + offset, MIN(geometry->pageSize, size - offset), NULL);
+        if (!flashWaitForReady()) {
+            return false;
+        }
+    }
+    flashFlush();
+
+    uint8_t check[WF_GAIN_READ_CHUNK];
+    for (uint32_t offset = 0; offset < size; offset += sizeof(check)) {
+        const uint32_t length = MIN((uint32_t)sizeof(check), size - offset);
+        if (!readGainFlash(base + offset, check, length) || memcmp(check, wfGainRam + offset, length) != 0) {
+            return false;
+        }
+    }
+    return true;
+}
+#endif
+
+wf_upload_result_t whippyflightUploadCommit(wf_gain_load_result_t *gainResult)
+{
+    *gainResult = wfGainResult;
+    if (ARMING_FLAG(ARMED)) {
+        return WF_UPLOAD_ARMED;
+    }
+    if (!wfUploading) {
+        return WF_UPLOAD_NOT_STARTED;
+    }
+    if (wfUploadReceived != wfUploadSize) {
+        return WF_UPLOAD_INCOMPLETE;
+    }
+#ifdef USE_FLASH_CHIP
+#ifdef USE_BLACKBOX
+    // Blackbox shares the dataflash (blackbox_mode ALWAYS logs disarmed).
+    if (!blackboxMayEditConfig()) {
+        return WF_UPLOAD_BUSY;
+    }
+#endif
+    uint32_t base, capacity;
+    if (!gainPartition(&base, &capacity)) {
+        return WF_UPLOAD_NO_STORE;
+    }
+    wfUploading = false;
+    *gainResult = initGains(WF_GAIN_OK, wfUploadSize, WF_GAIN_SOURCE_DATAFLASH);
+    if (*gainResult != WF_GAIN_OK) {
+        // The stored gains were never touched; fly those instead.
+        whippyflightLoadGains();
+        return WF_UPLOAD_REJECTED;
+    }
+    if (!writeGainFlash(base, wfUploadSize)) {
+        return WF_UPLOAD_VERIFY_FAILED;
+    }
+#ifdef SIMULATOR_BUILD
+    printf("[WHIPPYFLIGHT] gain upload: %u bytes written to dataflash\n", (unsigned)wfUploadSize);
+#endif
+    return WF_UPLOAD_OK;
+#else
+    return WF_UPLOAD_NO_STORE;
+#endif
+}
+
+uint16_t whippyflightArmingChecks(void)
+{
+    uint16_t failing = 0;
+    if (wfUploading) {
+        failing |= WF_CHECK_UPLOADING;
+    }
+    if (wfGainResult != WF_GAIN_OK) {
+        failing |= WF_CHECK_GAINS;
+    } else {
+        // The gains are discretised at the blob's dt.
+        const float pidDt = pidGetDT();
+        if (fabsf(pidDt - wfGainDt) > WF_GAIN_DT_TOLERANCE * wfGainDt) {
+            failing |= WF_CHECK_LOOP_RATE;
+        }
     }
     // The gains are scheduled on measured motor speed.
 #if defined(SIMULATOR_BUILD)
     if (!sitlHasEscTelemetry()) {
-        return "simulator sends no ESC telemetry";
+        failing |= WF_CHECK_RPM_TELEMETRY;
     }
 #elif defined(USE_DSHOT_TELEMETRY)
     if (!useDshotTelemetry) {
-        return "dshot_bidir off";
+        failing |= WF_CHECK_RPM_TELEMETRY;
     }
 #endif
     // Self-levelling setpoints come from pidController(), which this
@@ -513,10 +713,38 @@ const char *whippyflightArmingBlockReason(void)
         || isModeActivationConditionPresent(BOXPOSHOLD)
         || isModeActivationConditionPresent(BOXGPSRESCUE)
         || isModeActivationConditionPresent(BOXACROTRAINER)) {
-        return "self-level mode configured (angle/horizon/althold/poshold/rescue/trainer)";
+        failing |= WF_CHECK_SELF_LEVEL;
     }
     // Every other failsafe procedure flies in ANGLE_MODE.
     if (failsafeConfig()->failsafe_procedure != FAILSAFE_PROCEDURE_DROP_IT) {
+        failing |= WF_CHECK_FAILSAFE;
+    }
+    return failing;
+}
+
+const char *whippyflightArmingBlockReason(void)
+{
+    const uint16_t failing = whippyflightArmingChecks();
+    if (failing & WF_CHECK_UPLOADING) {
+        return "gain upload in progress";
+    }
+    if (failing & WF_CHECK_GAINS) {
+        return "gains not loaded";
+    }
+    if (failing & WF_CHECK_LOOP_RATE) {
+        return "PID loop rate does not match gain blob dt";
+    }
+    if (failing & WF_CHECK_RPM_TELEMETRY) {
+#if defined(SIMULATOR_BUILD)
+        return "simulator sends no ESC telemetry";
+#else
+        return "dshot_bidir off";
+#endif
+    }
+    if (failing & WF_CHECK_SELF_LEVEL) {
+        return "self-level mode configured (angle/horizon/althold/poshold/rescue/trainer)";
+    }
+    if (failing & WF_CHECK_FAILSAFE) {
         return "failsafe_procedure is not DROP";
     }
     return NULL;
@@ -524,7 +752,7 @@ const char *whippyflightArmingBlockReason(void)
 
 bool whippyflightIsReadyToArm(void)
 {
-    return whippyflightArmingBlockReason() == NULL;
+    return whippyflightArmingChecks() == 0;
 }
 
 #endif // USE_WHIPPYFLIGHT

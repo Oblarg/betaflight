@@ -31,7 +31,7 @@ import frccontrol as frcct
 
 # ── .wfg format constants ────────────────────────────────────────────────
 MAGIC       = 0x4C515247   # "LQRG" little-endian
-VERSION     = 7
+VERSION     = 8
 HEADER_SIZE = 0x20
 
 # Reference-model table, per grid point (BF axes, motors by index):
@@ -45,6 +45,13 @@ REF_LAYOUT = [          # (name, rows, cols); diagonal blocks stored as vectors
     ('fh_rw', 3, 4),    # h-tick free response, rate ← motor speed
 ]
 REF_FLOATS = sum(r * c for _, r, c in REF_LAYOUT)
+# The v8 blob stores the speed-free slots once and the rest per motor: each
+# depends on one motor's speed only (gains.rs REF_MOTOR_SLOTS), as
+# ref slots [ad_rw[:, m], ad_ww[m], bd_r[:, m], bd_w[m], fh_rw[:, m]].
+REF_CONST_SLOTS = [0, 1, 2, 35, 36, 37]
+REF_MOTOR_SLOTS = [[3 + 4 * i + m for i in range(3)] + [15 + m]
+                   + [19 + 4 * i + m for i in range(3)] + [31 + m]
+                   + [38 + 4 * i + m for i in range(3)] for m in range(4)]
 
 # ── Motor / axis conventions ─────────────────────────────────────────────
 #
@@ -61,8 +68,8 @@ REF_FLOATS = sum(r * c for _, r, c in REF_LAYOUT)
 # matching lqr/original_c/lqr_controller.c.  Gains are exported in BF axis
 # order [roll, pitch, yaw] with these signs folded in.
 #
-# Model motor speed unit is eRPM/600 (main.R: blackbox eRPM field / 6),
-# which the C glue reproduces from getDshotErpm().
+# Motor speeds are shaft rev/s: fit_model.py and the C glue both convert
+# eRPM with the airframe's motor_poles.
 
 # BF axis index → (model axis index, sign)
 MODEL_AXIS_FROM_BF = [(2, -1.0), (1, +1.0), (0, -1.0)]
@@ -246,7 +253,7 @@ def build_affine_P(coeffs, w):
 
 def build_affine_linearizer(coeffs, w):
     """
-    Linearizer gain G (4×4, V per (model rps)²): u_aff = G · [ω̂ᵢ|ω̂ᵢ|].
+    Linearizer gain G (4×4, V per (rev/s)²): u_aff = G · [ω̂ᵢ|ω̂ᵢ|].
 
     The plant is Ẋ = AX + BU + C(ω̂); the LQR is designed for Ẋ = AX + BU.
     U_aff = −B⁺C cancels the component of C in range(B) — the yaw row and
@@ -328,11 +335,7 @@ def build_airframe_drag(coeffs):
 # ── Airframe operating point ─────────────────────────────────────────────
 
 FULL_CELL_V = 4.2
-# Without an airframe block (pre-fit_model JSONs): the legacy 1S regression
-# airframe.
-LEGACY_CELLS = 1
-LEGACY_HOVER_RPS = 270.0
-LEGACY_LOOP_HZ = 4000.0
+MOTOR_SPEED_UNIT = "shaft rev/s"
 # Fractions of the weakest pitch/roll authority the setpoint target may use
 # (see src/setpoint.rs); they give 100 rot/s² and 5000 rot/s³ on the legacy
 # airframe, where the limits were tuned.
@@ -341,14 +344,13 @@ TARGET_JERK_FRACTION = 0.63
 
 
 def operating_point(coeffs):
-    """(cells, hover rps, loop Hz) from fit_model's airframe block."""
-    a = coeffs.get('airframe', {})
-    return (a.get('cells') or LEGACY_CELLS, a.get('hover_rps') or LEGACY_HOVER_RPS,
-            a.get('loop_hz') or LEGACY_LOOP_HZ)
+    """(cells, hover rev/s, loop Hz) from fit_model's airframe block."""
+    a = coeffs['airframe']
+    return a['cells'], a['hover_rps'], a['loop_hz']
 
 
 def steady_speed(coeffs, volts):
-    """Motor speed (model rps) the motor fit settles at on `volts`."""
+    """Motor speed (rev/s) the motor fit settles at on `volts`."""
     kw, kq = coeffs['motors']['motorVel'], coeffs['motors']['motorVelSq']
     return (-kw + math.sqrt(kw * kw + 4 * kq * volts)) / (2 * kq)
 
@@ -666,6 +668,25 @@ def crc32(data: bytes) -> int:
 
 # ── Pack .wfg ────────────────────────────────────────────────────────────
 
+def split_ref_by_motor(ref_flat, resolution):
+    """The flat N⁴ reference-model table as (speed-free slots [6], per-motor
+    table [N, 4, 11] flattened), checking it depends on each motor alone."""
+    N = resolution
+    ref = np.asarray(ref_flat, dtype=np.float64).reshape([N] * 4 + [REF_FLOATS])
+    origin = ref[0, 0, 0, 0]
+    per_motor = np.empty([N, 4, len(REF_MOTOR_SLOTS[0])])
+    for m, slots in enumerate(REF_MOTOR_SLOTS):
+        along = np.moveaxis(ref, m, 0)[:, 0, 0, 0]      # motor m's speed, the others at 0
+        per_motor[:, m] = along[:, slots]
+        rebuilt = np.expand_dims(along[:, slots], [a for a in range(1, 4)])
+        assert np.allclose(np.moveaxis(ref, m, 0)[..., slots], rebuilt,
+                           rtol=1e-6, atol=1e-9 * np.abs(along[:, slots]).max()), \
+            f"reference model depends on more than motor {m}'s speed"
+    const = origin[REF_CONST_SLOTS]
+    assert np.allclose(ref[..., REF_CONST_SLOTS], const, rtol=1e-6), "speed-dependent constant slot"
+    return const.astype(np.float32), per_motor.reshape(-1)
+
+
 def quantize_table(flat, width):
     """Quantize a table to u16, each of its `width` slots over its own range
     across the grid: value = lo + step·q.  Returns (lo, step, q)."""
@@ -688,11 +709,14 @@ def pack_wfg(ki_flat, kd_flat, kp_flat, binv_flat, ref_flat, affine_g, motor_dra
     """Pack gain tables, reference model, affine linearizer, motor drag,
     thrust balance, airframe drag, target limits, hover speed and integral
     voltage bound into .wfg."""
-    widths = [12, 12, 12, 12, REF_FLOATS]
+    ref_const, ref_motor = split_ref_by_motor(ref_flat, resolution)
+    widths = [12, 12, 12, 12, 4 * len(REF_MOTOR_SLOTS[0])]
     quantized = [quantize_table(flat, w)
-                 for flat, w in zip([ki_flat, kd_flat, kp_flat, binv_flat, ref_flat], widths)]
+                 for flat, w in zip([ki_flat, kd_flat, kp_flat, binv_flat, ref_motor], widths)]
     tables_bytes = b''
-    for lo, step, _ in quantized:
+    for k, (lo, step, _) in enumerate(quantized):
+        if k == 4:
+            tables_bytes += ref_const.astype('<f4').tobytes()
         tables_bytes += lo.astype('<f4').tobytes() + step.astype('<f4').tobytes()
     affine_flat = np.asarray(affine_g, dtype=np.float32).reshape(16)
     tables_bytes += struct.pack('<16f', *affine_flat)
@@ -726,19 +750,23 @@ def pack_wfg(ki_flat, kd_flat, kp_flat, binv_flat, ref_flat, affine_g, motor_dra
 
 # ── Main ─────────────────────────────────────────────────────────────────
 
-def main():
+def parse_args(argv=None):
+    """gen_wfg's command line (`argv`, default sys.argv[1:]), validated."""
     parser = argparse.ArgumentParser(
         description="Generate a WhippyFlight .wfg gain blob from regression coefficients.")
     parser.add_argument("coefficients", help="Path to regression_coefficients.json")
     parser.add_argument("output", help="Output .wfg file path")
     parser.add_argument("--resolution", "-n", type=int, default=3,
                         help="Grid resolution N (default: 3, max: 5)")
-    parser.add_argument("--min-rps", type=float, default=50.0,
-                        help="Minimum motor speed in rot/s (default: 50)")
+    parser.add_argument("--min-rps", type=float, default=80.0,
+                        help="Minimum motor speed, shaft rev/s (default: 80)")
+    parser.add_argument("--idle-rps", type=float, default=0.0,
+                        help="The FC's whippyflight_idle_rps, shaft rev/s: the grid starts "
+                             "there instead when it is above --min-rps, since the firmware "
+                             "never schedules the gains below it (default: 0, off)")
     parser.add_argument("--max-rps", type=float, default=None,
-                        help="Maximum motor speed in rot/s (default: the motor fit's steady "
-                             "speed on a full battery, rounded up to 10; 500 without an "
-                             "airframe block)")
+                        help="Maximum motor speed, shaft rev/s (default: the motor fit's "
+                             "steady speed on a full battery, rounded up to 10)")
     parser.add_argument("--dt", type=float, default=None,
                         help="Loop period in seconds (default: 1/airframe.loop_hz, else "
                              "0.00025 = 4 kHz)")
@@ -771,7 +799,7 @@ def main():
     parser.add_argument("--feedback-scale", type=float, default=1.0,
                         help="Scale Ki, Kd and Kp (0: feedforward only, for comparison "
                              "flights; the integral bound keeps the unscaled design's)")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     if args.resolution < 2 or args.resolution > 5:
         print("Error: resolution must be 2–5", file=sys.stderr)
@@ -780,22 +808,40 @@ def main():
         print("Error: ff-horizon must be 2–255 (h=1 has a sampling zero near −1)",
               file=sys.stderr)
         sys.exit(1)
+    if not args.idle_rps >= 0:
+        print("Error: idle-rps must be ≥ 0", file=sys.stderr)
+        sys.exit(1)
+    args.min_rps = max(args.min_rps, args.idle_rps)
+    if args.max_rps is not None and args.max_rps <= args.min_rps:
+        print(f"Error: the grid's top, {args.max_rps:g} rev/s, must be above its bottom, "
+              f"{args.min_rps:g}", file=sys.stderr)
+        sys.exit(1)
+    return args
 
+
+def generate(args):
+    """Solve and pack the blob `args` describe (filling in their defaults that
+    depend on the airframe); returns it and the gain tables at the grid points."""
     print(f"Loading coefficients from {args.coefficients}", file=sys.stderr)
     with open(args.coefficients, 'r') as f:
         coeffs = json.load(f)
+    if coeffs.get('motor_speed') != MOTOR_SPEED_UNIT or 'airframe' not in coeffs:
+        sys.exit(f"{args.coefficients} was fitted before motor speeds were in "
+                 f"{MOTOR_SPEED_UNIT}; fit it again with fit_model.py")
 
     cells, hover_rps, loop_hz = operating_point(coeffs)
     vbat_full = cells * FULL_CELL_V
     if args.max_rps is None:
-        args.max_rps = (10 * math.ceil(steady_speed(coeffs, vbat_full) / 10)
-                        if 'airframe' in coeffs else 500.0)
+        args.max_rps = 10 * math.ceil(steady_speed(coeffs, vbat_full) / 10)
+        if args.max_rps <= args.min_rps:
+            sys.exit(f"the grid's bottom, {args.min_rps:g} rev/s, is at or above the motors' "
+                     f"full-battery speed, {args.max_rps:g}")
     if args.dt is None:
         args.dt = 1.0 / loop_hz
     if args.sigma_volt is None:
         args.sigma_volt = 1.0 * cells
-    print(f"Airframe: {cells}S ({vbat_full:.1f} V full), hover {hover_rps:.0f} rps; "
-          f"grid {args.min_rps:.0f}–{args.max_rps:.0f} rps, dt {args.dt * 1e6:.1f} µs, "
+    print(f"Airframe: {cells}S ({vbat_full:.1f} V full), hover {hover_rps:.0f} rev/s; "
+          f"grid {args.min_rps:.0f}–{args.max_rps:.0f} rev/s, dt {args.dt * 1e6:.1f} µs, "
           f"σ_volt {args.sigma_volt:.2f} V", file=sys.stderr)
 
     print(f"Solving {'structured LQR' if args.structured else 'DARE'} on {args.resolution}⁴ = {args.resolution**4} grid points...",
@@ -839,7 +885,12 @@ def main():
                     args.resolution, args.min_rps, args.max_rps,
                     args.dt, args.tau_int, args.tau_deriv, args.ff_horizon,
                     airframe_drag, target_limits, hover_rps, integral_limit_v)
+    return blob, (ki_py, kd_py, kp_py, binv_py, affine_g)
 
+
+def main():
+    args = parse_args()
+    blob, (ki_py, kd_py, kp_py, binv_py, affine_g) = generate(args)
     with open(args.output, 'wb') as f:
         f.write(blob)
     print(f"Wrote {len(blob)} bytes to {args.output}", file=sys.stderr)
@@ -854,7 +905,7 @@ def main():
         for m in range(4):
             print(f"    motor {m}: [{vals[m,0]:.4f}, {vals[m,1]:.4f}, {vals[m,2]:.4f}]",
                   file=sys.stderr)
-    print("  Affine linearizer G (V per rps², motor × signed-square):", file=sys.stderr)
+    print("  Affine linearizer G (V per (rev/s)², motor × signed-square):", file=sys.stderr)
     for m in range(4):
         print("    motor {}: [{}]".format(m, ", ".join(f"{g:.3e}" for g in affine_g[m])),
               file=sys.stderr)

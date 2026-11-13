@@ -863,7 +863,7 @@ void initPhase3(void)
 #ifdef USE_WHIPPYFLIGHT
     // Reads the SD card and the dataflash partition table, so it must follow
     // both inits.  On failure arming stays blocked (ARMING_DISABLED_WHIPPYFLIGHT).
-    whippyflightLoadGains();
+    whippyflightInit();
 #endif
 #ifdef USE_BLACKBOX
     blackboxInit();

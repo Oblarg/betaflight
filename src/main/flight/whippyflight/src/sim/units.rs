@@ -1,6 +1,5 @@
-//! f64 quantities for the test plant and evals (the controller's own types
-//! are f32; convert with `lossy_into`).
-#![allow(dead_code)]
+//! f64 quantities for the plant and the simulations flown on it (the
+//! controller's own types are f32; convert with `lossy_into`).
 
 use whippyunits::qty;
 

@@ -46,7 +46,7 @@ import sys
 import threading
 
 from fat_image import build_image
-from sim_plant import Plant
+from sim_plant import Plant, erpm_from_rps
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 OBJ_DIR = os.path.realpath(os.path.join(SCRIPT_DIR, "..", "..", "..", "..", "..", "obj"))
@@ -80,11 +80,13 @@ DT = struct.unpack_from("<f", _hdr, 0x10)[0]
 RC_EVERY = round(0.002 / DT)
 # fdm_packet followed by ESC telemetry (fdm_packet_esc in SITL target.h).
 FDM_ESC_FMT = "<d3d3d4d3d3dd4dd"
-OPEN_LOOP_OMEGA = 300.0  # motor speed (eRPM/600) reported without a plant
+OPEN_LOOP_OMEGA = 500.0  # motor speed (shaft rev/s) reported without a plant
 # Plant coefficients: the JSON $WFG_PATH was generated from.
 COEFFS = os.environ.get("PLANT_JSON", os.path.join(SCRIPT_DIR, "airframes", "meteor65.json"))
 with open(COEFFS) as _f:
-    VBAT = json.load(_f).get("airframe", {}).get("vbat_v", 4.2)  # V; 4.2 = 1S Meteor65
+    _airframe = json.load(_f)["airframe"]
+VBAT = _airframe.get("vbat_v", 4.2)  # V; 4.2 = 1S Meteor65
+MOTOR_POLES = _airframe["motor_poles"]
 
 
 # ---------- MSP helpers ----------
@@ -109,6 +111,42 @@ def msp_decode_first(data):
             break
         return cmd, data[i + 5 : i + 5 + length]
     return None, None
+
+
+def crc8_dvb_s2(data):
+    crc = 0
+    for b in data:
+        crc ^= b
+        for _ in range(8):
+            crc = ((crc << 1) ^ 0xD5) & 0xFF if crc & 0x80 else (crc << 1) & 0xFF
+    return crc
+
+
+def msp2_encode(cmd, payload=b""):
+    body = struct.pack("<BHH", 0, cmd, len(payload)) + payload
+    return b"$X<" + body + bytes([crc8_dvb_s2(body)])
+
+
+def msp2_request(sock, cmd, payload=b"", timeout=2.0):
+    """Send an MSP v2 request → (ok, reply payload); ok is False for an
+    error reply ('!'), None on timeout."""
+    sock.send(msp2_encode(cmd, payload))
+    data = b""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            data += sock.recv(4096)
+        except Exception:
+            continue
+        i = 0
+        while (i := data.find(b"$X", i)) >= 0 and i + 8 <= len(data):
+            _, rcmd, length = struct.unpack_from("<BHH", data, i + 3)
+            if i + 9 + length > len(data):
+                break
+            if rcmd == cmd:
+                return data[i + 2] == ord(">"), data[i + 8 : i + 8 + length]
+            i += 9 + length
+    return None, b""
 
 
 def decode_arming_flags(p):
@@ -288,7 +326,7 @@ class Sim:
                 if self.plant:
                     gyro, erpm = self.plant.imu_rpy(), self.plant.erpm()
                 else:
-                    gyro, erpm = self.gyro, [600.0 * OPEN_LOOP_OMEGA] * 4
+                    gyro, erpm = self.gyro, [erpm_from_rps(OPEN_LOOP_OMEGA, MOTOR_POLES)] * 4
             if self.iteration % RC_EVERY == 0:
                 self.rc_sock.sendto(struct.pack("<d16H", self.t, *ch[:16]), ("127.0.0.1", 9004))
             pkt = struct.pack(
@@ -412,6 +450,80 @@ def check_gain_sources(blob):
         ok &= passed
         print(f"  {'✓' if passed else '✗'} {name}: {line}")
     return ok
+
+
+# MSP2_WHIPPYFLIGHT_* (msp_protocol_v2_betaflight.h, flight/whippyflight_msp.c).
+MSP2_WF_STATUS, MSP2_WF_BEGIN, MSP2_WF_DATA, MSP2_WF_COMMIT, MSP2_WF_ABORT = range(0x3100, 0x3105)
+WF_UPLOAD_OK, WF_UPLOAD_REJECTED = 0, 8
+WF_SOURCE_DATAFLASH = 2
+
+
+def wf_status(sock):
+    ok, p = msp2_request(sock, MSP2_WF_STATUS)
+    if not ok or len(p) < 35:
+        return None
+    (version, result, source, uploading, size, crc, blob_dt, pid_dt, partition,
+     upload_size, received, max_chunk, reason_len) = struct.unpack_from("<4BIIffIIIHB", p)
+    return {"version": version, "result": result, "source": source, "uploading": bool(uploading),
+            "size": size, "crc": crc, "blob_dt": blob_dt, "pid_dt": pid_dt,
+            "partition": partition, "received": received, "max_chunk": max_chunk,
+            "reason": p[35 : 35 + reason_len].decode(errors="replace")}
+
+
+def wf_upload(sock, blob):
+    """Upload `blob` over MSP → (upload result, gain load result)."""
+    st = wf_status(sock)
+    ok, r = msp2_request(sock, MSP2_WF_BEGIN, struct.pack("<I", len(blob)))
+    if not ok or r[0] != WF_UPLOAD_OK:
+        return (r[0] if r else None), None
+    for off in range(0, len(blob), st["max_chunk"]):
+        ok, r = msp2_request(sock, MSP2_WF_DATA, struct.pack("<I", off) + blob[off : off + st["max_chunk"]])
+        if not ok or r[0] != WF_UPLOAD_OK:
+            msp2_request(sock, MSP2_WF_ABORT)
+            return (r[0] if r else None), None
+    ok, r = msp2_request(sock, MSP2_WF_COMMIT, timeout=30.0)
+    return (r[0], r[1]) if ok else (None, None)
+
+
+def check_msp_upload(blob):
+    """Upload over MSP into an erased dataflash, check it survives a reboot,
+    and that a corrupt upload is refused without losing the stored gains."""
+    install_gains(None, None)
+    proc = start_sitl("/tmp/sitl_upload.log")
+    sock = wait_tcp(5761, 30)
+    if not sock:
+        print("  FAILED to connect MSP")
+        proc.kill()
+        return False
+    sock.settimeout(0.1)
+    before = wf_status(sock)
+    print(f"  before: {before}")
+    t0 = time.monotonic()
+    upload = wf_upload(sock, blob)
+    after = wf_status(sock)
+    print(f"  upload {len(blob)} B: result={upload} in {time.monotonic() - t0:.1f}s")
+    print(f"  after: {after}")
+    crc = struct.unpack_from("<I", blob, len(blob) - 4)[0]
+    ok = (before is not None and before["result"] == GAIN_BAD_MAGIC
+          and upload == (WF_UPLOAD_OK, GAIN_OK) and after is not None
+          and after["result"] == GAIN_OK and after["source"] == WF_SOURCE_DATAFLASH
+          and after["size"] == len(blob) and after["crc"] == crc and not after["uploading"])
+
+    corrupt = bytearray(blob)
+    corrupt[len(blob) // 2] ^= 0xFF
+    rejected = wf_upload(sock, bytes(corrupt))
+    kept = wf_status(sock)
+    print(f"  corrupt upload: result={rejected}, then {kept}")
+    ok = ok and rejected == (WF_UPLOAD_REJECTED, GAIN_BAD_CHECKSUM) and kept == after
+    sock.close()
+    proc.kill()
+    proc.wait()
+
+    image = open(DATAFLASH, "rb").read()
+    stored = image[GAIN_PARTITION_OFFSET : GAIN_PARTITION_OFFSET + len(blob)] == blob
+    line = boot_gain_load("/tmp/sitl_upload_reboot.log")
+    print(f"  partition holds blob={stored}; reboot: {line}")
+    return ok and stored and line is not None and f"from dataflash: result=0, {len(blob)} bytes" in line
 
 
 def cli_command(sock, cmd, settle=0.3):
@@ -763,7 +875,7 @@ def plot_closed_loop(plt, episodes, metrics, title, path):
             shade_saturation(motors, trace)
             motors.set_title(f"{name} {window}: motor speeds (duty saturated shaded"
                              + (f", {100 * m['sat']:.1f}%)" if m and w == 0 else ")"), fontsize=10)
-            motors.set_ylabel("eRPM/600")
+            motors.set_ylabel("rev/s")
             for a in (ax, motors):
                 if xlim:
                     a.set_xlim(*xlim)
@@ -873,7 +985,7 @@ def closed_loop(label="closed_loop", peak=FLICK_PEAK, rise_s=FLICK_RISE_S, hold_
         res["hover"] = h = hover_metrics(trace)
         print(f"  gyro mean={[round(v, 4) for v in h['gyro_mean']]} rot/s, "
               f"dev={[round(v, 4) for v in h['gyro_dev']]} rot/s")
-        print(f"  motor speeds={[round(v, 1) for v in h['omega']]} eRPM/600")
+        print(f"  motor speeds={[round(v, 1) for v in h['omega']]} rev/s")
         for name, (channel, axis, sign) in STICK_AXES.items():
             setpoint = sign * (peak - 1500) / 500.0
             print(f"\n--- {name} flick to {setpoint:+.2f} rot/s over {rise_s * 1e3:.0f} ms, "
@@ -949,6 +1061,9 @@ def main():
         os.remove(EEPROM)
     sources_ok = check_gain_sources(blob)
 
+    print("\nPhase 0b: Gain upload over MSP")
+    upload_ok = check_msp_upload(blob)
+
     # ======= PHASE A: Configure eeprom =======
     print("\nPhase A: Configure eeprom")
     if os.path.exists(EEPROM):
@@ -975,6 +1090,7 @@ def main():
     config = [
         b"aux 0 0 0 1700 2100", b"set small_angle = 180", b"set debug_mode = WHIPPYFLIGHT",
         b"set motor_idle = 0", b"set rates_type = ACTUAL",
+        b"set motor_poles = %d" % MOTOR_POLES,
     ]
     for axis in (b"roll", b"pitch", b"yaw"):
         config += [b"set " + axis + b"_rc_rate = 36", b"set " + axis + b"_srate = 36",
@@ -1159,6 +1275,12 @@ def main():
         print("  ✓ Gain source selection (SD, dataflash fallback, error reporting)")
     else:
         print("  ✗ Gain source selection")
+        passed = False
+
+    if upload_ok:
+        print("  ✓ Gains uploaded over MSP to dataflash, kept across reboot, corrupt upload refused")
+    else:
+        print("  ✗ Gain upload over MSP")
         passed = False
 
     if results.get("gains_from_sd"):

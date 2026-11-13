@@ -34,6 +34,9 @@
 //! passes through G_h⁺; measured errors are left to the LQR feedback.
 //! Older blobs fall back to the one-tick `u_ff = B⁻¹·Δr`.
 //!
+//! On the ground (armed before takeoff, or after landing) there is no
+//! feedforward, and the reference model stays seeded at the setpoint.
+//!
 //! # Airframe drag
 //!
 //! With the `airframe-drag` feature and a v7 blob that carries a drag model,
@@ -67,8 +70,12 @@ pub struct ControllerState {
     prev_prop_error: PropErrorVec,
     /// Previous setpoint (for feedforward diff).
     prev_setpoint: PropErrorVec,
-    /// Minimum linearization speed (model units); see [`Self::set_min_rps`].
+    /// Minimum linearization speed (shaft rev/s); see [`Self::set_min_rps`].
     min_rps: RotPerSec,
+    /// Cutoff of the low-pass on reported motor speeds; see [`Self::set_motor_lpf`].
+    motor_lpf: Hertz,
+    /// Low-passed motor speeds; `None` until the first sample.
+    motor_rps_lp: Option<[RotPerSec; 4]>,
     /// Feedforward reference-model rate state r_ref.
     ref_rate: PropErrorVec,
     /// Feedforward reference-model motor-speed deviation δω_ref.
@@ -98,6 +105,8 @@ impl ControllerState {
             prev_prop_error: zeros![AttitudeAxes, Scalar as f32],
             prev_setpoint: zeros![AttitudeAxes, Scalar as f32],
             min_rps: RotPerSec::new(0.0),
+            motor_lpf: Hertz::new(0.0),
+            motor_rps_lp: None,
             ref_rate: zeros![AttitudeAxes, Scalar as f32],
             ref_speed: zeros![MotorSpeedAxes, Scalar as f32],
             ref_seeded: false,
@@ -112,6 +121,7 @@ impl ControllerState {
                 affine_v: Default::default(),
                 error_prop: Default::default(),
                 error_integral: Default::default(),
+                error_integral_rate: Default::default(),
                 error_derivative: Default::default(),
                 kp_motor0: Default::default(),
                 collective_v: Volt::new(0.0),
@@ -134,13 +144,14 @@ impl ControllerState {
         self.saturated = false;
         self.airborne = false;
         self.landing_s = Seconds::new(0.0);
+        self.motor_rps_lp = None;
         #[cfg(feature = "airframe-drag")]
         {
             self.accel_lp = None;
         }
     }
 
-    /// Set the minimum linearization speed, in model units (eRPM/600).
+    /// Set the minimum linearization speed, in shaft rev/s.
     ///
     /// Gains grow without bound as any pitch/roll motor's speed → 0 (thrust
     /// authority ∝ ω), so reported speeds are clamped up to
@@ -149,6 +160,32 @@ impl ControllerState {
     /// the gains were solved.
     pub fn set_min_rps(&mut self, min_rps: RotPerSec) {
         self.min_rps = min_rps;
+    }
+
+    /// Set the cutoff of a one-pole low-pass on the reported motor speeds,
+    /// which everything downstream reads (gain schedule, feedforward,
+    /// affine linearizer, takeoff/landing); 0 turns it off.  Telemetry
+    /// jitter in the speeds otherwise reaches the motors through the
+    /// schedule's feedforward, most during big rate commands.  The same
+    /// filter as BF's `pt1FilterGain` (e.g. on rpm_filter_lpf_hz).
+    pub fn set_motor_lpf(&mut self, cutoff: Hertz) {
+        self.motor_lpf = cutoff.max(Hertz::new(0.0));
+    }
+
+    /// This tick's motor speeds, through the [`Self::set_motor_lpf`] filter.
+    fn filter_motor_speeds(&mut self, raw: [RotPerSec; 4], dt: Seconds) -> [RotPerSec; 4] {
+        if self.motor_lpf <= Hertz::new(0.0) {
+            self.motor_rps_lp = None;
+            return raw;
+        }
+        let x: f32 = (2.0 * core::f32::consts::PI * self.motor_lpf * dt).into();
+        let k = x / (1.0 + x);
+        let lp = match self.motor_rps_lp {
+            Some(p) => core::array::from_fn(|m| p[m] + k * (raw[m] - p[m])),
+            None => raw,
+        };
+        self.motor_rps_lp = Some(lp);
+        lp
     }
 
     pub fn telemetry(&self) -> &LqrTelemetry {
@@ -210,9 +247,14 @@ impl ControllerState {
         let measurement: PropErrorVec = from_array(sensors.gyro_rps);
         let setpoint_vec: SetpointDiffVec = from_array(setpoint.rate_rps);
 
+        let measured_rps = self.filter_motor_speeds(sensors.motor_rps, dt);
+        self.update_flight_state(sensors, measured_rps, gains, dt);
+
         // Seed the reference model at the current setpoint so the first tick
-        // after a reset produces no feedforward transient.
-        if gains.has_ref_model && !self.ref_seeded {
+        // after a reset produces no feedforward transient.  On the ground it
+        // stays seeded there (see the feedforward below), so takeoff doesn't
+        // produce one either.
+        if gains.has_ref_model && (!self.ref_seeded || !self.airborne) {
             self.ref_rate = setpoint_vec;
             self.ref_speed = zeros![MotorSpeedAxes, Scalar as f32];
             self.prev_setpoint = setpoint_vec;
@@ -240,7 +282,6 @@ impl ControllerState {
         // at INTEGRAL_ERROR_RATE_LIMIT.  While the last command was
         // saturated, or on the ground, the error isn't correctable, so the
         // state only leaks (anti-windup).
-        self.update_flight_state(sensors, gains, dt);
         let int_gain = if self.saturated || !self.airborne { Seconds::new(0.0) } else { dt * alpha_int };
         let int_raw: IntegralErrorVec =
             self.integral_error.scale(1.0 - alpha_int) + prop_error * int_gain;
@@ -255,7 +296,7 @@ impl ControllerState {
         // --- Gain interpolation (returns typed matrices) ---
         let header = &gains.header;
         let floor = self.min_rps.max(header.min_rps);
-        let motor_rps = sensors.motor_rps.map(|w| w.clamp(floor, header.max_rps));
+        let motor_rps = measured_rps.map(|w| w.clamp(floor, header.max_rps));
         let interp = interpolate_gains(&motor_rps, gains);
 
         // --- Feedback law: u_fb = Kp·e + Ki·e_int + Kd·ė ---
@@ -289,7 +330,13 @@ impl ControllerState {
             None => setpoint_vec + setpoint_diff.scale(gains.header.ff_horizon as f32),
         };
         let drag = if gains.has_ref_model { self.airframe_drag(sensors, gains, dt) } else { None };
-        let feedforward: MotorVoltageVec = if gains.has_ref_model {
+        // None on the ground: the speeds there are idle, far below hover,
+        // where thrust per volt is small and G_h⁺ large, so a gentle stick
+        // ramp asks for ±Vbat, and the airframe resting on the ground can't
+        // follow it anyway.
+        let feedforward: MotorVoltageVec = if !self.airborne {
+            zeros![MotorAxes, Scalar as f32]
+        } else if gains.has_ref_model {
             self.reference_feedforward(&interp.ref_model, &interp.binv, target, drag,
                                        gains.header.ff_horizon, battery_v)
         } else {
@@ -325,7 +372,7 @@ impl ControllerState {
         // Propagate the reference model with the feedforward the motors
         // actually got: each motor's share of its command that survived
         // scaling/clipping (the collective c·n is not part of the command).
-        if gains.has_ref_model {
+        if gains.has_ref_model && self.airborne {
             let realized: MotorVoltageVec = if alloc.saturated {
                 let ff = to_array(&feedforward);
                 from_array(core::array::from_fn(|m| {
@@ -352,6 +399,7 @@ impl ControllerState {
             affine_v: to_array(&affine),
             error_prop: to_array(&prop_error),
             error_integral: to_array(&self.integral_error),
+            error_integral_rate: to_array(&self.integral_error).map(|x| x / dt),
             error_derivative: to_array(&self.derivative_error),
             kp_motor0: [kp.get(0, 0), kp.get(0, 1), kp.get(0, 2)],
             collective_v: alloc.collective_v,
@@ -370,17 +418,19 @@ impl ControllerState {
 }
 
 impl ControllerState {
-    /// Track takeoff and landing, which gate integral accumulation.  Latches
+    /// Track takeoff and landing, which gate integral accumulation and the
+    /// feedforward.  Latches
     /// airborne at TAKEOFF_SPEED_FRACTION of hover; lands after the slow,
     /// quiet (and, with an accelerometer, 1 g) condition holds.  Without a
     /// hover speed in the blob the controller counts as always airborne.
-    fn update_flight_state(&mut self, sensors: &SensorData, gains: &GainStorage, dt: Seconds) {
+    fn update_flight_state(&mut self, sensors: &SensorData, motor_rps: [RotPerSec; 4],
+                           gains: &GainStorage, dt: Seconds) {
         let hover = gains.hover_rps;
         if hover <= RotPerSec::new(0.0) {
             self.airborne = true;
             return;
         }
-        let w = sensors.motor_rps;
+        let w = motor_rps;
         let mean_rps = 0.25 * (w[0] + w[1] + w[2] + w[3]);
         if !self.airborne {
             if mean_rps >= TAKEOFF_SPEED_FRACTION * hover {
