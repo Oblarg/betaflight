@@ -1,30 +1,17 @@
-//! WhippyFlight — LQR flight control stack for Betaflight.
+//! WhippyFlight for Betaflight: the C ABI the firmware glue
+//! (`whippyflight_glue.c`) calls, over [`whippyflight_control`].
 //!
-//! This crate implements a gain-scheduled LQR controller for multirotor
-//! attitude rate control.  It is compiled as a C-compatible static library
-//! (`staticlib`) and linked into the Betaflight firmware image.
-//!
-//! # Architecture
-//!
-//! Betaflight is the HAL: it reads sensors, drives motors, handles blackbox /
-//! MSP / OSD.  This crate is a pure control law — it takes sensor data in and
-//! produces motor voltage commands out.  It owns no hardware.
-//!
-//! The control law uses precomputed gain matrices (generated offline by solving
-//! the discrete-time algebraic Riccati equation at a grid of operating points)
-//! that are uploaded to onboard flash and loaded at boot.
+//! Compiled as a static library and linked into the Betaflight image.
+//! Betaflight is the HAL: it reads sensors, drives motors, handles
+//! blackbox / MSP / OSD, and stores the gain blob.  This crate holds the
+//! controller's state for the firmware's single control loop and converts
+//! Betaflight's units and conventions to and from the controller's
+//! ([`bf`]).
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
-pub mod allocation;
-pub mod controller;
-mod ffi;
-pub mod gains;
-pub mod interpolation;
-pub mod setpoint;
-#[cfg(feature = "sim")]
-pub mod sim;
-pub mod types;
+pub mod bf;
+pub mod ffi;
 
 // Panic handler for embedded — required by no_std staticlib builds.
 // In release builds panics are compiled out (panic = "abort" + LTO).

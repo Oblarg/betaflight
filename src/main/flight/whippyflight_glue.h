@@ -62,14 +62,19 @@ typedef enum {
     WF_GAIN_MISALIGNED     = 6,
     WF_GAIN_TOO_LARGE      = 7,   // blob exceeds WHIPPYFLIGHT_GAIN_STORE_SIZE (glue only)
     WF_GAIN_NO_STORE       = 8,   // no gain file on SD and no gain partition (glue only)
+    WF_GAIN_BAD_LAYOUT     = 9,   // motor layout block is not a quad X
+    WF_GAIN_LAYOUT_MISMATCH = 10, // motor layout differs from the mixer's (mixer, yaw_motors_reversed)
 } wf_gain_load_result_t;
 
 // ---------------------------------------------------------------------------
 // Rust FFI functions (symbols from the staticlib).
 // ---------------------------------------------------------------------------
 
+// mixer_mode and yaw_motors_reversed are mixerConfig()'s; the blob's motor
+// layout must be the one the mixer drives.
 extern wf_gain_load_result_t whippyflight_init(
-    const uint8_t *gains_buf, uint32_t gains_len);
+    const uint8_t *gains_buf, uint32_t gains_len,
+    uint8_t mixer_mode, bool yaw_motors_reversed);
 
 // One RX frame: raw rate setpoint (deg/s, [roll, pitch, yaw]), its arrival
 // time on the micros() clock, and the current RX rate in Hz.

@@ -1,14 +1,17 @@
-//! Tests for Betaflight interop: unit conversion, axis ordering, motor mapping.
+//! Tests for Betaflight interop: unit conversion, axes, motor mapping.
 //!
-//! The C glue hands BF-native values (deg/s, centivolts, eRPM/100) to the FFI
-//! as [`BfSensorData`]; these tests convert them the same way and check the
-//! controller sees the right rates, voltages and motor speeds, and that the
-//! telemetry going back ([`BfTelemetry`]) is in the units BF logs.
+//! The C glue hands BF-native values (deg/s, centivolts, eRPM/100, FLU
+//! axes) to the FFI as [`BfSensorData`]; these tests convert them the same
+//! way and check the controller sees the right rates, voltages and motor
+//! speeds in FRD, and that the telemetry going back ([`BfTelemetry`]) is in
+//! the units and axes BF logs.
 
 mod common;
 
-use common::put;
+use whippyflight_betaflight::bf::*;
+use whippyflight_betaflight::ffi::*;
 use whippyflight_control::controller::ControllerState;
+use whippyflight_control::gains::spec::BlobSpec;
 use whippyflight_control::gains::{GainStorage, load_gains};
 use whippyflight_control::types::*;
 use whippyunits::api::rescale_f32;
@@ -33,9 +36,9 @@ fn bf_sensors(gyro: [DegPerSec; 3], motor_erpm: [HundredErpm; 4], battery: Centi
     .to_sensor_data()
 }
 
-/// `getRawSetpoint(axis)` (deg/s), converted as `whippyflight_setpoint_packet` does.
+/// `getRawSetpoint(axis)` (deg/s, FLU), converted as `whippyflight_setpoint_packet` does.
 fn bf_setpoint_to_rps(rate: [DegPerSec; 3]) -> [RotPerSec; 3] {
-    rate.map(rescale_f32)
+    flu_frd(rate.map(rescale_f32))
 }
 
 /// Simulate BF C glue: motor duty [0,1] → DShot value.
@@ -53,43 +56,18 @@ fn dshot_to_duty(dshot: f32) -> f32 {
 }
 
 // =========================================================================
-// Test gain builder (reused from test_controller.rs)
+// Test gain builder
 // =========================================================================
 
-/// Kp = diag(kp) on motors 0..3, every other table zero.
+/// Kp = diag(kp) on motors 0..3, every other table zero, for BF's props-in
+/// quad X.
 fn make_kp_gains(resolution: u8, kp: VoltPerRps, dt: Seconds) -> Vec<u8> {
-    let n = resolution as usize;
-    let floats_per_table = n * n * n * n * 4 * 3;
-    let bytes_per_table = floats_per_table * 4;
-    let payload_size = 0x20 + 4 * bytes_per_table;
-    let total_size = payload_size + 4;
-    let mut buf = vec![0u8; total_size];
-
-    buf[0..4].copy_from_slice(&0x4C51_5247u32.to_le_bytes());
-    buf[4..6].copy_from_slice(&1u16.to_le_bytes());
-    buf[6] = resolution;
-    put(&mut buf, 0x08, RotPerSec::new(100.0));
-    put(&mut buf, 0x0C, RotPerSec::new(500.0));
-    put(&mut buf, 0x10, dt);
-    put(&mut buf, 0x14, Seconds::new(0.1));
-    put(&mut buf, 0x18, Seconds::new(0.01));
-    buf[0x1C..0x20].copy_from_slice(&(total_size as u32).to_le_bytes());
-
-    // Tables in blob order ki, kd, kp, binv; ki, kd and binv stay zero.
-    let mut offset = 0x20 + 2 * bytes_per_table;
-    for _grid_point in 0..(floats_per_table / 12) {
-        for motor in 0..4u32 {
-            for axis in 0..3u32 {
-                let val = if motor < 3 && motor == axis { kp } else { VoltPerRps::new(0.0) };
-                put(&mut buf, offset, val);
-                offset += 4;
-            }
-        }
-    }
-
-    let crc = common::crc32(&buf[..payload_size]);
-    buf[payload_size..payload_size + 4].copy_from_slice(&crc.to_le_bytes());
-    buf
+    let mut spec = BlobSpec::new(resolution);
+    spec.dt = value!(dt, s, f32);
+    let kp = value!(kp, V / (rot / s), f32);
+    BlobSpec::fill(&mut spec.kp, |motor, axis| if motor == axis { kp } else { 0.0 });
+    spec.layout = quadx_layout(false);
+    spec.encode()
 }
 
 fn load_test_gains() -> GainStorage {
@@ -110,11 +88,11 @@ const MOTORS_200: [RotPerSec; 4] = [RotPerSec::new(200.0); 4];
 
 #[test]
 fn bf_dps_to_rps_conversion() {
-    // 360 deg/s = 1 rot/s
+    // 360 deg/s = 1 rot/s; BF's pitch (nose down) is FRD's −pitch.
     let rps = bf_sensors([360.0, 180.0, 0.0].map(DegPerSec::new), ERPM_200, CentiVolt::new(1680.0)).gyro_rps;
     let tol = RotPerSec::new(1e-6);
     assert!((rps[0] - RotPerSec::new(1.0)).abs() < tol, "360 dps should be 1 rps, got {:?}", rps[0]);
-    assert!((rps[1] - RotPerSec::new(0.5)).abs() < tol, "180 dps should be 0.5 rps, got {:?}", rps[1]);
+    assert!((rps[1] - RotPerSec::new(-0.5)).abs() < tol, "180 dps should be -0.5 rps, got {:?}", rps[1]);
     assert!(rps[2].abs() < tol, "0 dps should be 0 rps, got {:?}", rps[2]);
 }
 
@@ -151,8 +129,17 @@ fn shaft_speed_follows_the_pole_count() {
     assert_eq!(mechanical_from_erpm(erpm, 0), mechanical_from_erpm(erpm, 2));
 }
 
-/// Telemetry leaves in the units BF logs it in: `pidData` floats per logged
-/// count, `debug[]` rounded and saturated to `int16_t`.
+/// BF's gyro and setpoint are FLU: roll as is, pitch and yaw negated.
+#[test]
+fn bf_axes_are_flu() {
+    let rps = bf_sensors([90.0, 180.0, 360.0].map(DegPerSec::new), ERPM_200, CentiVolt::new(1680.0)).gyro_rps;
+    assert_eq!(rps.map(|r| value!(r, rot / s, f32)), [0.25, -0.5, -1.0]);
+    let sp = bf_setpoint_to_rps([90.0, 180.0, 360.0].map(DegPerSec::new));
+    assert_eq!(sp.map(|r| value!(r, rot / s, f32)), [0.25, -0.5, -1.0]);
+}
+
+/// Telemetry leaves in the units and axes BF logs it in: `pidData` floats
+/// per logged count, `debug[]` rounded and saturated to `int16_t`.
 #[test]
 fn bf_telemetry_encoding() {
     let mut t = *ControllerState::new().telemetry();
@@ -164,17 +151,19 @@ fn bf_telemetry_encoding() {
     t.ff_target_rps = [RotPerSec::new(0.0001); 3];
     t.feedforward_v[0] = Volt::new(3.456);
     t.command_scale = 0.9876;
-    let bf = t.to_bf([RotPerSec::new(-1.0); 3]);
+    let bf = BfTelemetry::encode(&t, [RotPerSec::new(-1.0); 3]);
 
     let close = |a: f32, b: f32| (a - b).abs() < 1e-3 * b.abs().max(1.0);
     let p = bf.pid_p.map(|x| value!(x, 0.1 * deg / s, f32));
-    assert!(close(p[0], 3600.0) && close(p[1], -1800.0) && close(p[2], 3.6), "{p:?}");
-    assert!(close(value!(bf.pid_i[0], 0.1 * deg / s, f32), 900.0));
-    assert!(close(value!(bf.pid_d[0], deg / s ^ 2, f32), 360.0));
+    assert!(close(p[0], 3600.0) && close(p[1], 1800.0) && close(p[2], -3.6), "{p:?}");
+    let i = bf.pid_i.map(|x| value!(x, 0.1 * deg / s, f32));
+    assert!(close(i[0], 900.0) && close(i[1], -900.0) && close(i[2], -900.0), "{i:?}");
+    let d = bf.pid_d.map(|x| value!(x, deg / s ^ 2, f32));
+    assert!(close(d[0], 360.0) && close(d[1], -360.0) && close(d[2], -360.0), "{d:?}");
 
     assert_eq!(bf.feedback.map(|v| value!(v, mV, i16)), [1250, 0, i16::MAX, 0]);
-    assert_eq!(value!(bf.raw_setpoint[0], 0.1 * deg / s, i16), -3600);
-    assert_eq!(value!(bf.setpoint[0], 0.1 * deg / s, i16), 1800);
+    assert_eq!(bf.raw_setpoint.map(|r| value!(r, 0.1 * deg / s, i16)), [-3600, 3600, 3600]);
+    assert_eq!(bf.setpoint.map(|r| value!(r, 0.1 * deg / s, i16)), [1800, -1800, -1800]);
     assert_eq!(value!(bf.ff_target[0], 0.1 * deg / s, i16), 0);
     assert_eq!(value!(bf.feedforward_motor0, cV, i16), 346);
     assert_eq!(value!(bf.command_scale, 0.001, i16), 988);
@@ -196,7 +185,8 @@ fn bf_telemetry_layout() {
     assert_eq!(size_of::<BfTelemetry>(), 68);
 }
 
-/// The glue's accelerometer reading is a count of g₀.
+/// The glue's accelerometer reading is a count of g₀ on BF's FLU axes: at
+/// rest BF reads +1 g₀ on z (up), FRD −g₀ (z down).
 #[test]
 fn bf_accel_g_to_mps2() {
     let accel = BfSensorData {
@@ -209,7 +199,7 @@ fn bf_accel_g_to_mps2() {
     .to_sensor_data()
     .accel
     .map(|a| value!(a, m / s ^ 2, f32));
-    let expected = [0.0, -4.903325, 9.80665];
+    let expected = [0.0, 4.903325, -9.80665];
     for (a, e) in accel.into_iter().zip(expected) {
         assert!((a - e).abs() < 1e-5, "{accel:?}");
     }
@@ -438,4 +428,38 @@ fn negative_gyro_converts_correctly() {
         telem.error_prop[0] > RotPerSec::new(1.5),
         "roll error should be ~2.0 (correcting -2 rps spin), got {:?}", telem.error_prop[0]
     );
+}
+
+// =========================================================================
+// FFI: layout check and BF axes end to end
+// =========================================================================
+
+/// One test, since the FFI's state is global.
+#[test]
+fn ffi_checks_layout_and_speaks_bf_axes() {
+    let blob = common::static_blob(&make_kp_gains(2, VoltPerRps::new(1.0), Seconds::new(0.000125)));
+    let init = |mixer, reversed| unsafe { whippyflight_init(blob.as_ptr(), blob.len() as u32, mixer, reversed) };
+    assert_eq!(init(MIXER_QUADX, true), GainLoadResult::LayoutMismatch, "props out");
+    assert_eq!(init(MIXER_QUADX - 1, false), GainLoadResult::LayoutMismatch, "quad +");
+
+    let slot_order = common::static_blob(&BlobSpec::new(2).encode());
+    assert_eq!(
+        unsafe { whippyflight_init(slot_order.as_ptr(), slot_order.len() as u32, MIXER_QUADX, false) },
+        GainLoadResult::LayoutMismatch,
+    );
+
+    assert_eq!(init(MIXER_QUADX, false), GainLoadResult::Ok);
+    // BF gyro pitching at +360 deg/s (nose down), sticks centred: BF's
+    // own rate error is −360 deg/s, and the telemetry logs it so.
+    let sensors = BfSensorData {
+        gyro: [0.0, 360.0, 0.0].map(DegPerSec::new),
+        motor_erpm: ERPM_200,
+        battery: CentiVolt::new(1680.0),
+        accel_g: [0.0, 0.0, 1.0],
+        motor_poles: POLES,
+    };
+    unsafe { whippyflight_update(&sensors, 0.5, Micros::new(1000)) };
+    let telemetry = unsafe { &*whippyflight_telemetry() };
+    let p = telemetry.pid_p.map(|x| value!(x, 0.1 * deg / s, f32));
+    assert!(p[0].abs() < 1.0 && (p[1] + 3600.0).abs() < 1.0 && p[2].abs() < 1.0, "{p:?}");
 }

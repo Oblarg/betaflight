@@ -567,8 +567,8 @@
 #if defined(USE_WHIPPYFLIGHT) && !defined(WHIPPYFLIGHT_GAIN_STORE_SIZE)
 // Largest gain blob the target accepts: both the dataflash partition it is
 // stored in and the RAM buffer it is copied to at boot.  26 KiB holds a
-// 4-point grid (v8, 25 848 bytes; 3 points is 8960) and fits F411 RAM
-// alongside SD support; 5 points needs ~61 KiB.
+// 4-point grid (v10, 19 840 bytes; 3 points is 7128) and fits F411 RAM
+// alongside SD support; 5 points needs ~46 KiB.
 #define WHIPPYFLIGHT_GAIN_STORE_SIZE (26 * 1024)
 #endif
 

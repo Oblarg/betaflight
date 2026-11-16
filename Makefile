@@ -221,10 +221,6 @@ endif
 LD_FLAGS        :=
 EXTRA_LD_FLAGS  :=
 
-# WhippyFlight: EXTRA_LD_FLAGS for the Rust LQR controller staticlib are
-# added in the platform mk file (e.g. SITL.mk) where WHIPPYFLIGHT_TARGET
-# is defined, so that the library search path resolves correctly.
-
 #
 # Default Tool options - can be overridden in {mcu}.mk files.
 #
@@ -292,6 +288,10 @@ include $(TARGET_PLATFORM_DIR)/mk/$(TARGET_MCU_FAMILY).mk
 # Sourced after the MCU .mk so each feature file can check what the
 # platform asked for.
 include $(MAKE_SCRIPT_DIR)/dronecan.mk
+
+ifneq ($(filter USE_WHIPPYFLIGHT,$(OPTIONS)),)
+include $(MAKE_SCRIPT_DIR)/whippyflight.mk
+endif
 
 # Validate the platform toolchain is available
 include $(MAKE_SCRIPT_DIR)/tools_check.mk
@@ -597,8 +597,8 @@ $(TARGET_HEX): $(TARGET_BIN)
 
 endif
 
-ifneq ($(WHIPPYFLIGHT_LIB_DIR),)
-$(TARGET_ELF): $(WHIPPYFLIGHT_LIB_DIR)/libwhippyflight_control.a
+ifneq ($(WHIPPYFLIGHT_LIB),)
+$(TARGET_ELF): $(WHIPPYFLIGHT_LIB)
 endif
 
 $(TARGET_ELF): $(TARGET_OBJS) $(LD_SCRIPT) $(LD_SCRIPTS)

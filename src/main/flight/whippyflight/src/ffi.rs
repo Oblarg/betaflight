@@ -8,7 +8,7 @@
 //! Every argument is in BF's own unit (deg/s, centivolts, eRPM/100, Hz, µs),
 //! typed as such, and telemetry comes back in the units BF logs it in
 //! ([`BfTelemetry`]), so the C glue copies values through unconverted and
-//! every conversion to and from WhippyFlight's units happens here.
+//! every conversion to and from WhippyFlight's units and axes happens here.
 //!
 //! Quantity arguments are `#[repr(transparent)]` over their storage, so they
 //! cross the C ABI exactly as the `float`/`uint32_t` the glue declares.
@@ -16,10 +16,11 @@
 use core::cell::UnsafeCell;
 use core::mem::MaybeUninit;
 
-use crate::controller::ControllerState;
-use crate::gains::{self, GainStorage};
-use crate::setpoint::SetpointEstimator;
-use crate::types::*;
+use crate::bf::*;
+use whippyflight_control::controller::ControllerState;
+use whippyflight_control::gains::{self, GainStorage};
+use whippyflight_control::setpoint::SetpointEstimator;
+use whippyflight_control::types::*;
 use whippyunits::api::rescale_f32;
 
 // ---------------------------------------------------------------------------
@@ -84,11 +85,17 @@ unsafe fn controller_ref() -> &'static ControllerState {
 /// must point at static, 4-byte-aligned memory (the glue's RAM copy of the
 /// gain store) that is only rewritten after [`whippyflight_unload`].
 ///
+/// `mixer_mode` and `yaw_motors_reversed` are `mixerConfig()`'s: the blob
+/// is rejected ([`GainLoadResult::LayoutMismatch`]) unless its motor layout
+/// is the one BF's mixer drives.
+///
 /// Returns 0 on success, nonzero on error (see [`GainLoadResult`]).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn whippyflight_init(
     gains_buf: *const u8,
     gains_len: u32,
+    mixer_mode: u8,
+    yaw_motors_reversed: bool,
 ) -> GainLoadResult {
     if gains_buf.is_null() || gains_len == 0 {
         return GainLoadResult::TooShort;
@@ -97,7 +104,13 @@ pub unsafe extern "C" fn whippyflight_init(
     // SAFETY: the caller guarantees the buffer is static (see above).
     let data: &'static [u8] = unsafe { core::slice::from_raw_parts(gains_buf, gains_len as usize) };
     let storage = unsafe { GAINS.get_mut() };
-    let result = gains::load_gains(data, storage);
+    let mut result = gains::load_gains(data, storage);
+    if result == GainLoadResult::Ok
+        && (mixer_mode != MIXER_QUADX || storage.layout != quadx_layout(yaw_motors_reversed))
+    {
+        storage.loaded = false;
+        result = GainLoadResult::LayoutMismatch;
+    }
 
     if result == GainLoadResult::Ok {
         unsafe { controller_mut() }.reset();
@@ -116,7 +129,7 @@ pub unsafe extern "C" fn whippyflight_unload() {
 }
 
 /// Feed one RX packet to the setpoint estimator: the raw (unsmoothed) rate
-/// setpoint [roll, pitch, yaw] (`getRawSetpoint`), the packet's arrival time,
+/// setpoint [roll, pitch, yaw], FLU (`getRawSetpoint`), the packet's arrival time,
 /// and the current RX rate estimate (`getCurrentRxRateHz`).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn whippyflight_setpoint_packet(
@@ -125,7 +138,7 @@ pub unsafe extern "C" fn whippyflight_setpoint_packet(
     rx_rate: Hertz,
 ) {
     let rate = unsafe { core::slice::from_raw_parts(rate, 3) };
-    let rate = [rate[0], rate[1], rate[2]].map(rescale_f32);
+    let rate = flu_frd([rate[0], rate[1], rate[2]].map(rescale_f32));
     unsafe { SETPOINT.get_mut() }.packet(rate, time_us, 1.0 / rx_rate);
 }
 
@@ -143,9 +156,11 @@ pub unsafe extern "C" fn whippyflight_update(
     let gains = unsafe { GAINS.get_ref() };
 
     let dt = gains.header.dt;
-    let (rate_rps, target) = unsafe { SETPOINT.get_mut() }
-        .tick(now_us, dt);
-    ctrl.update_with_target(sensors, &SetpointData { rate_rps, throttle }, target, gains)
+    let setpoint = unsafe { SETPOINT.get_mut() };
+    let (rate_rps, target) = setpoint.tick(now_us, dt);
+    let out = ctrl.update_with_target(sensors, &SetpointData { rate_rps, throttle }, target, gains);
+    setpoint.condition(ctrl.reachable_target());
+    out
 }
 
 /// Set the minimum linearization speed from the idle speed
@@ -187,6 +202,6 @@ pub unsafe extern "C" fn whippyflight_telemetry() -> *const BfTelemetry {
     }
     let raw = unsafe { SETPOINT.get_ref() }.raw();
     let telemetry = unsafe { BF_TELEMETRY.get_mut() };
-    telemetry.write(unsafe { controller_ref() }.telemetry().to_bf(raw));
+    telemetry.write(BfTelemetry::encode(unsafe { controller_ref() }.telemetry(), raw));
     telemetry.as_ptr()
 }

@@ -478,7 +478,8 @@ static wf_gain_load_result_t loadGainsFromFlash(uint32_t *blobSize)
 static wf_gain_load_result_t initGains(wf_gain_load_result_t result, uint32_t blobSize, wf_gain_source_t source)
 {
     if (result == WF_GAIN_OK) {
-        result = whippyflight_init(wfGainRam, blobSize);
+        result = whippyflight_init(wfGainRam, blobSize,
+                                   mixerConfig()->mixerMode, mixerConfig()->yaw_motors_reversed);
     }
     if (result == WF_GAIN_OK) {
         memcpy(&wfGainDt, wfGainRam + WF_GAIN_DT_OFFSET, sizeof(wfGainDt));

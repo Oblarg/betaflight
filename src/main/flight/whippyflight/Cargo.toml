@@ -1,48 +1,35 @@
 [package]
-name = "whippyflight-control"
+name = "whippyflight-betaflight"
 version = "0.1.0"
 edition = "2024"
 authors = ["Oblarg"]
 license = "GPL-3.0-or-later"
-description = "LQR flight control stack for Betaflight, powered by whippyunits + whippyalgebra"
+description = "Betaflight adapter for whippyflight-control: the C ABI the firmware glue calls"
+publish = false
 
 [lib]
-name = "whippyflight_control"
+name = "whippyflight_betaflight"
 crate-type = ["staticlib", "lib"]
 
 [dependencies]
-# Unit-safe quantities — no_std, no alloc
-# >= 0.3.4 for standard gravity (`g_n`), 0.3.5 for compile-time float rescale factors.
+# The firmware-agnostic controller.  A path dependency on a whippyflight
+# checkout next to this one, until the crate is published.
+whippyflight-control = { path = "../../../../../whippyflight/crates/whippyflight-control" }
 whippyunits = { version = "0.3.5", default-features = false }
-# Unit-safe linear algebra over nalgebra — no_std, no alloc
-# Correctly rounded sqrtf for no_std (core has none); already in the
-# dependency graph through whippyunits.
 libm = "0.2"
-# Zero-copy typed views of the gain blob's tables.
 bytemuck = { version = "1", default-features = false }
-whippyalgebra = { version = "0.1.1", default-features = false, features = ["nalgebra"] }
-# The sim plant reads fit_model.py's coefficient JSON.
-serde_json = { version = "1", optional = true }
 
 [features]
 default = []
-# Enable std for host-side testing (cargo test on x86); host builds always
-# carry the airframe drag mode and the sim so the tests and evals exercise them.
-std = ["whippyunits/std", "whippyalgebra/std", "airframe-drag", "sim"]
-# The nonlinear plant and stick-flick simulation (`sim`), for the evals and
-# the Configurator's WhippyFlight tab.
-sim = ["std", "dep:serde_json"]
-# Compensate the rotor-drag torque of tall frames from the accelerometer
-# when the blob has a drag block (v7).  Off by default: small frames don't
-# need it, and without it the block is parsed but ignored.
-airframe-drag = []
-
+# Host-side testing (cargo test on the host target).
+std = ["whippyflight-control/std", "whippyunits/std", "airframe-drag"]
+# See whippyflight-control's feature of the same name.
+airframe-drag = ["whippyflight-control/airframe-drag"]
 [profile.release]
 opt-level = "s"    # optimize for size on embedded
 lto = true
 codegen-units = 1
 panic = "abort"
 
-# panic = "abort" for dev is set via .cargo/config.toml for embedded builds;
-# omitted here so `cargo test` on host can use the default unwinding harness.
-
+# The firmware build (mk/whippyflight.mk) builds release for the MCU's
+# target; `cargo test --features std` runs the tests on the host.
