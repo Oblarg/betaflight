@@ -12,9 +12,8 @@ name = "whippyflight_betaflight"
 crate-type = ["staticlib", "lib"]
 
 [dependencies]
-# The firmware-agnostic controller.  A path dependency on a whippyflight
-# checkout next to this one, until the crate is published.
-whippyflight-control = { path = "../../../../../whippyflight/crates/whippyflight-control" }
+# The firmware-agnostic controller.
+whippyflight-control = "0.1.0"
 whippyunits = { version = "0.3.5", default-features = false }
 libm = "0.2"
 bytemuck = { version = "1", default-features = false }
