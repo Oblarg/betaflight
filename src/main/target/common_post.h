@@ -564,6 +564,12 @@
 #undef USE_FLASHFS
 #endif
 
+#if defined(USE_WHIPPYFLIGHT)
+// Filter every gyro sample rather than every PID loop's, so motor noise above
+// the PID loop's Nyquist frequency is filtered out before it can alias.
+#define USE_GYRO_FILTER_AT_SAMPLE_RATE
+#endif
+
 #if defined(USE_WHIPPYFLIGHT) && !defined(WHIPPYFLIGHT_GAIN_STORE_SIZE)
 // Largest gain blob the target accepts: both the dataflash partition it is
 // stored in and the RAM buffer it is copied to at boot.  26 KiB holds a

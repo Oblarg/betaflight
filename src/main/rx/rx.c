@@ -719,6 +719,16 @@ STATIC_UNIT_TESTED float applyRxChannelRangeConfiguraton(float sample, scaleRang
     return sample;
 }
 
+bool rxStickChannelNorm(int channel, float sampleUs, float *norm)
+{
+    sampleUs = applyRxChannelRangeConfiguraton(sampleUs, &rxRuntimeState.scaleRange[channel]);
+    if (!isPulseValid(sampleUs)) {
+        return false;
+    }
+    *norm = rcUsToNorm(constrainf(sampleUs, PWM_PULSE_MIN, PWM_PULSE_MAX));
+    return true;
+}
+
 static void readRxChannelsApplyRanges(void)
 {
     for (int channel = 0; channel < rxChannelCount; channel++) {

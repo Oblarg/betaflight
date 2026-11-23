@@ -678,7 +678,7 @@ void dynLpfGyroUpdate(float throttle)
             cutoffFreq = fmaxf(dynThrottle(throttle) * gyro.dynLpfMax, gyro.dynLpfMin);
         }
         DEBUG_SET(DEBUG_DYN_LPF, 2, lrintf(cutoffFreq));  //!< Lowpass Cutoff [unit:Hz]
-        const float gyroDt = gyro.targetLooptime * 1e-6f;
+        const float gyroDt = gyro.filterLooptime * 1e-6f;
         switch (gyro.dynLpfFilter) {
         case DYN_LPF_PT1:
             for (int axis = 0; axis < XYZ_AXIS_COUNT; axis++) {

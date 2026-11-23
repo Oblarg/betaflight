@@ -55,6 +55,9 @@
 #include "drivers/compass/compass_virtual.h"
 #include "flight/imu.h"
 #include "flight/position.h"
+#ifdef USE_WHIPPYFLIGHT
+#include "flight/whippyflight_glue.h"
+#endif
 
 #include "config/feature.h"
 #include "config/config.h"
@@ -1102,6 +1105,16 @@ static void pwmCompleteMotorUpdate(void)
     STATIC_ASSERT(DEBUG16_VALUE_COUNT == ARRAYLEN(((servo_packet_debug *)0)->debug), servo_packet_debug_size);
     servo_packet_debug debugPkt = { .servo = pwmPkt };
     memcpy(debugPkt.debug, debug, sizeof(debugPkt.debug));
+#ifdef USE_WHIPPYFLIGHT
+    const wf_bf_telemetry_t *wfTelemetry = whippyflightTelemetry();
+    if (wfTelemetry != NULL) {
+        for (int axis = 0; axis < 3; axis++) {
+            debugPkt.setpoint[axis][0] = wfTelemetry->raw_setpoint[axis];
+            debugPkt.setpoint[axis][1] = lrintf(wfTelemetry->pid_setpoint[axis] * 10.0f);
+            debugPkt.setpoint[axis][2] = lrintf(wfTelemetry->pid_f[axis]);
+        }
+    }
+#endif
     udpSend(&pwmLink, &debugPkt, sizeof(debugPkt));
     __atomic_add_fetch(&simStatSent, 1, __ATOMIC_RELAXED);
 #else

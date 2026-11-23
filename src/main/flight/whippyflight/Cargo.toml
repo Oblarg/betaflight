@@ -15,8 +15,10 @@ crate-type = ["staticlib", "lib"]
 # The firmware-agnostic controller.
 whippyflight-control = "0.1.0"
 whippyunits = { version = "0.3.5", default-features = false }
-libm = "0.2"
 bytemuck = { version = "1", default-features = false }
+
+[dev-dependencies]
+libm = "0.2"
 
 [features]
 default = []
@@ -24,8 +26,12 @@ default = []
 std = ["whippyflight-control/std", "whippyunits/std", "airframe-drag"]
 # See whippyflight-control's feature of the same name.
 airframe-drag = ["whippyflight-control/airframe-drag"]
+
+[patch.crates-io]
+whippyflight-control = { path = "../../../../../whippyflight/crates/whippyflight-control" }
+
 [profile.release]
-opt-level = "s"    # optimize for size on embedded
+opt-level = 3
 lto = true
 codegen-units = 1
 panic = "abort"

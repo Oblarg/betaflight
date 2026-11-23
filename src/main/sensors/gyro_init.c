@@ -89,7 +89,7 @@ static uint8_t gyroDetectedFlags = 0;
 static uint16_t calculateNyquistAdjustedNotchHz(uint16_t notchHz, uint16_t notchCutoffHz)
 {
     // Limit the nyquist to 95% to help with stability
-    const uint32_t gyroFrequencyNyquist = (1000000 / 2 / gyro.targetLooptime) * 0.95f;
+    const uint32_t gyroFrequencyNyquist = (1000000 / 2 / gyro.filterLooptime) * 0.95f;
     if (notchHz > gyroFrequencyNyquist) {
         if (notchCutoffHz < gyroFrequencyNyquist) {
             notchHz = gyroFrequencyNyquist;
@@ -111,7 +111,7 @@ static void gyroInitFilterNotch1(uint16_t notchHz, uint16_t notchCutoffHz)
         gyro.notchFilter1ApplyFn = (filterApplyFnPtr)svfNotchApply;
         const float notchQ = filterGetNotchQ(notchHz, notchCutoffHz);
         for (int axis = 0; axis < XYZ_AXIS_COUNT; axis++) {
-            svfNotchInit(&gyro.notchFilter1[axis], notchHz, gyro.targetLooptime * 1e-6f, notchQ);
+            svfNotchInit(&gyro.notchFilter1[axis], notchHz, gyro.filterLooptime * 1e-6f, notchQ);
         }
     }
 }
@@ -126,7 +126,7 @@ static void gyroInitFilterNotch2(uint16_t notchHz, uint16_t notchCutoffHz)
         gyro.notchFilter2ApplyFn = (filterApplyFnPtr)svfNotchApply;
         const float notchQ = filterGetNotchQ(notchHz, notchCutoffHz);
         for (int axis = 0; axis < XYZ_AXIS_COUNT; axis++) {
-            svfNotchInit(&gyro.notchFilter2[axis], notchHz, gyro.targetLooptime * 1e-6f, notchQ);
+            svfNotchInit(&gyro.notchFilter2[axis], notchHz, gyro.filterLooptime * 1e-6f, notchQ);
         }
     }
 }
@@ -243,7 +243,7 @@ void gyroInitFilters(void)
       FILTER_LPF1,
       gyroConfig()->gyro_lpf1_type,
       gyro_lpf1_init_hz,
-      gyro.targetLooptime
+      gyro.filterLooptime
     );
 
     gyro.downsampleFilterEnabled = gyroInitLowpassFilterLpf(
@@ -259,13 +259,13 @@ void gyroInitFilters(void)
     dynLpfFilterInit();
 #endif
 #ifdef USE_DYN_NOTCH_FILTER
-    dynNotchInit(dynNotchConfig(), gyro.targetLooptime);
+    dynNotchInit(dynNotchConfig(), gyro.filterLooptime);
 #endif
 #ifdef USE_RPM_FILTER
-    rpmFilterInit(rpmFilterConfig(), gyro.targetLooptime);
+    rpmFilterInit(rpmFilterConfig(), gyro.filterLooptime);
 #endif
 
-    const float k = pt1FilterGain(GYRO_IMU_DOWNSAMPLE_CUTOFF_HZ, gyro.targetLooptime * 1e-6f);
+    const float k = pt1FilterGain(GYRO_IMU_DOWNSAMPLE_CUTOFF_HZ, gyro.filterLooptime * 1e-6f);
     for (int axis = 0; axis < XYZ_AXIS_COUNT; axis++) {
         pt1FilterInit(&gyro.imuGyroFilter[axis], k);
     }
@@ -821,6 +821,11 @@ void gyroSetTargetLooptime(uint8_t pidDenom)
         gyro.sampleLooptime = 0;
         gyro.targetLooptime = 0;
     }
+#ifdef USE_GYRO_FILTER_AT_SAMPLE_RATE
+    gyro.filterLooptime = gyro.sampleLooptime;
+#else
+    gyro.filterLooptime = gyro.targetLooptime;
+#endif
 }
 
 gyroDev_t *gyroActiveDev(void)

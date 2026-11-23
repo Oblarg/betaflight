@@ -61,5 +61,8 @@ float getMaxRcRate(int axis);
 float getFeedforward(int axis);
 
 void updateRcRefreshRate(timeUs_t currentTimeUs, bool rxReceivingSignal);
+// The raw rate setpoint, deg/s, a roll, pitch or yaw channel (normalized as
+// rcData) commands: rawSetpoint without the autopilot or camera-angle mix.
+float rcStickSetpoint(int axis, float channel);
 float getCurrentRxRateHz(void);
 bool getRxRateValid(void);

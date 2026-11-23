@@ -139,7 +139,7 @@ fn bf_axes_are_flu() {
 }
 
 /// Telemetry leaves in the units and axes BF logs it in: `pidData` floats
-/// per logged count, `debug[]` rounded and saturated to `int16_t`.
+/// per logged count, `int16_t` fields rounded and saturated.
 #[test]
 fn bf_telemetry_encoding() {
     let mut t = *ControllerState::new().telemetry();
@@ -147,9 +147,8 @@ fn bf_telemetry_encoding() {
     t.error_integral_rate = [RotPerSec::new(0.25); 3];
     t.error_derivative = [RotPerSecSq::new(1.0); 3];
     t.feedback_v = [Volt::new(1.25), Volt::new(-0.0004), Volt::new(40.0), Volt::new(f32::NAN)];
-    t.setpoint_rps = [RotPerSec::new(0.5); 3];
-    t.ff_target_rps = [RotPerSec::new(0.0001); 3];
-    t.feedforward_v[0] = Volt::new(3.456);
+    t.setpoint_rps = [RotPerSec::new(0.0001); 3];
+    t.ff_target_rps = [RotPerSec::new(0.5); 3];
     t.command_scale = 0.9876;
     let bf = BfTelemetry::encode(&t, [RotPerSec::new(-1.0); 3]);
 
@@ -160,13 +159,51 @@ fn bf_telemetry_encoding() {
     assert!(close(i[0], 900.0) && close(i[1], -900.0) && close(i[2], -900.0), "{i:?}");
     let d = bf.pid_d.map(|x| value!(x, deg / s ^ 2, f32));
     assert!(close(d[0], 360.0) && close(d[1], -360.0) && close(d[2], -360.0), "{d:?}");
+    let f = bf.pid_f.map(|x| value!(x, 0.1 * deg / s, f32));
+    assert!(close(f[0], 0.36) && close(f[1], -0.36) && close(f[2], -0.36), "{f:?}");
 
     assert_eq!(bf.feedback.map(|v| value!(v, mV, i16)), [1250, 0, i16::MAX, 0]);
     assert_eq!(bf.raw_setpoint.map(|r| value!(r, 0.1 * deg / s, i16)), [-3600, 3600, 3600]);
-    assert_eq!(bf.setpoint.map(|r| value!(r, 0.1 * deg / s, i16)), [1800, -1800, -1800]);
-    assert_eq!(value!(bf.ff_target[0], 0.1 * deg / s, i16), 0);
-    assert_eq!(value!(bf.feedforward_motor0, cV, i16), 346);
     assert_eq!(value!(bf.command_scale, 0.001, i16), 988);
+    assert_eq!(bf.pid_setpoint.map(|r| value!(r, deg / s, f32)), [180.0, -180.0, -180.0]);
+}
+
+/// `int16_t` fields round as `roundf` does, saturating, with NaN to 0.
+#[test]
+fn bf_debug_rounding() {
+    let cases = [
+        0.0, 0.4999999, 0.5, -0.5, 1.5, -2.5, 2.4999998, -7.5000005, 32766.5, 32767.4, -32768.4,
+        1e6, -1e6, 1e12, -1e12, f32::MAX, f32::INFINITY, f32::NEG_INFINITY,
+    ];
+    for x in cases {
+        let got = value!(to_debug(Volt::new(x)), V, i16);
+        assert_eq!(got, libm::roundf(x) as i16, "{x}");
+    }
+    assert_eq!(value!(to_debug(Volt::new(f32::NAN)), V, i16), 0);
+}
+
+/// Each motor's effort leaves in mV (and 0.1 rev/s), on its own BF motor index.
+#[test]
+fn bf_effort_encoding() {
+    let mut t = *ControllerState::new().telemetry();
+    let per_motor = |base: f32| core::array::from_fn(|m| Volt::new(base + m as f32 * 0.001));
+    t.feedback_p_v = per_motor(1.0);
+    t.feedback_i_v = per_motor(-0.2);
+    t.feedback_d_v = per_motor(0.03);
+    t.feedforward_v = per_motor(2.0);
+    t.affine_v = per_motor(3.0);
+    t.schedule_jitter_v = per_motor(0.004);
+    t.applied_v = per_motor(4.0);
+    t.filtered_rps = core::array::from_fn(|m| RotPerSec::new(300.0 + m as f32));
+    let bf = BfTelemetry::encode(&t, [RotPerSec::new(0.0); 3]);
+
+    for (m, e) in bf.effort.iter().enumerate() {
+        let m = m as i16;
+        let mv = [e.p, e.i, e.d, e.feedforward, e.affine, e.schedule_jitter, e.applied]
+            .map(|v| value!(v, mV, i16));
+        assert_eq!(mv, [1000 + m, -200 + m, 30 + m, 2000 + m, 3000 + m, 4 + m, 4000 + m]);
+        assert_eq!(value!(e.filtered_speed, 0.1 * rot / s, i16), 3000 + 10 * m);
+    }
 }
 
 /// `BfTelemetry` matches `wf_bf_telemetry_t` in whippyflight_glue.h.
@@ -176,13 +213,22 @@ fn bf_telemetry_layout() {
     assert_eq!(offset_of!(BfTelemetry, pid_p), 0);
     assert_eq!(offset_of!(BfTelemetry, pid_i), 12);
     assert_eq!(offset_of!(BfTelemetry, pid_d), 24);
-    assert_eq!(offset_of!(BfTelemetry, feedback), 36);
-    assert_eq!(offset_of!(BfTelemetry, raw_setpoint), 44);
-    assert_eq!(offset_of!(BfTelemetry, setpoint), 50);
-    assert_eq!(offset_of!(BfTelemetry, ff_target), 56);
-    assert_eq!(offset_of!(BfTelemetry, feedforward_motor0), 62);
-    assert_eq!(offset_of!(BfTelemetry, command_scale), 64);
-    assert_eq!(size_of::<BfTelemetry>(), 68);
+    assert_eq!(offset_of!(BfTelemetry, pid_f), 36);
+    assert_eq!(offset_of!(BfTelemetry, feedback), 48);
+    assert_eq!(offset_of!(BfTelemetry, raw_setpoint), 56);
+    assert_eq!(offset_of!(BfTelemetry, command_scale), 62);
+    assert_eq!(offset_of!(BfTelemetry, pid_setpoint), 64);
+    assert_eq!(offset_of!(BfTelemetry, effort), 76);
+    assert_eq!(size_of::<BfTelemetry>(), 140);
+    assert_eq!(offset_of!(BfEffort, p), 0);
+    assert_eq!(offset_of!(BfEffort, i), 2);
+    assert_eq!(offset_of!(BfEffort, d), 4);
+    assert_eq!(offset_of!(BfEffort, feedforward), 6);
+    assert_eq!(offset_of!(BfEffort, affine), 8);
+    assert_eq!(offset_of!(BfEffort, schedule_jitter), 10);
+    assert_eq!(offset_of!(BfEffort, applied), 12);
+    assert_eq!(offset_of!(BfEffort, filtered_speed), 14);
+    assert_eq!(size_of::<BfEffort>(), 16);
 }
 
 /// The glue's accelerometer reading is a count of g₀ on BF's FLU axes: at
@@ -391,7 +437,7 @@ fn full_bf_round_trip() {
     // All motors should produce valid DShot values
     for (i, &ds) in dshot_values.iter().enumerate() {
         assert!(
-            ds >= DSHOT_MIN && ds <= DSHOT_MAX,
+            (DSHOT_MIN..=DSHOT_MAX).contains(&ds),
             "motor[{i}] DShot={ds} out of range [{DSHOT_MIN}, {DSHOT_MAX}]"
         );
     }

@@ -161,8 +161,12 @@
 #define PARAM_NAME_RPM_FILTER_LPF_HZ "rpm_filter_lpf_hz"
 #define PARAM_NAME_WHIPPYFLIGHT_RPM_LPF_HZ "whippyflight_rpm_lpf_hz"
 #define PARAM_NAME_WHIPPYFLIGHT_ENABLED "whippyflight_enabled"
-#define PARAM_NAME_WHIPPYFLIGHT_STICK_TRACKING "whippyflight_stick_tracking"
 #define PARAM_NAME_WHIPPYFLIGHT_IDLE_RPS "whippyflight_idle_rps"
+#define PARAM_NAME_WHIPPYFLIGHT_DEBUG_MOTOR "whippyflight_debug_motor"
+#define PARAM_NAME_WHIPPYFLIGHT_CRITICAL_CELL_VOLTAGE "whippyflight_critical_cell_voltage"
+#define PARAM_NAME_WHIPPYFLIGHT_DROPOUT_RAMP_MS "whippyflight_dropout_ramp_ms"
+#define PARAM_NAME_WHIPPYFLIGHT_VBAT_LPF_HZ "whippyflight_vbat_lpf_hz"
+#define PARAM_NAME_WHIPPYFLIGHT_BRAKE_MARGIN "whippyflight_brake_margin"
 
 #define PARAM_NAME_ALTITUDE_SOURCE "altitude_source"
 #define PARAM_NAME_ALTITUDE_PREFER_BARO "altitude_prefer_baro"

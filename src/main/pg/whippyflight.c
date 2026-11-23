@@ -28,13 +28,17 @@
 
 #include "whippyflight.h"
 
-PG_REGISTER_WITH_RESET_TEMPLATE(whippyflightConfig_t, whippyflightConfig, PG_WHIPPYFLIGHT_CONFIG, 4);
+PG_REGISTER_WITH_RESET_TEMPLATE(whippyflightConfig_t, whippyflightConfig, PG_WHIPPYFLIGHT_CONFIG, 5);
 
 PG_RESET_TEMPLATE(whippyflightConfig_t, whippyflightConfig,
     .rpm_lpf_hz = 50,
     .enabled = 1,
-    .stick_tracking = 800,
     .idle_rps = 0,
+    .debug_motor = 0,
+    .critical_cell_voltage = 0,
+    .dropout_ramp_ms = 12,
+    .vbat_lpf_hz = 20,
+    .brake_margin = 0,
 );
 
 #endif // USE_WHIPPYFLIGHT

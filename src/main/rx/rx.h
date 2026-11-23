@@ -227,6 +227,10 @@ void rxFrameCheck(timeUs_t currentTimeUs, timeDelta_t currentDeltaTimeUs);
 bool isRxReceivingSignal(void);
 bool rxAreFlightChannelsValid(void);
 bool calculateRxChannelsAndUpdateFailsafe(timeUs_t currentTimeUs);
+// A roll, pitch, yaw or throttle channel's raw sample, µs as the driver
+// reads it (`channel` in rcmap order), as rcData holds it while the link
+// is good; false for an invalid pulse.
+bool rxStickChannelNorm(int channel, float sampleUs, float *norm);
 
 struct rxConfig_s;
 

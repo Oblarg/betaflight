@@ -46,6 +46,10 @@
 #include "sensors/battery.h"
 #include "sensors/esc_sensor.h"
 
+#ifdef USE_WHIPPYFLIGHT
+#include "pg/whippyflight.h"
+#endif
+
 #include "voltage.h"
 
 const char * const voltageMeterSourceNames[VOLTAGE_METER_COUNT] = {
@@ -242,6 +246,12 @@ void voltageMeterGenericInit(void)
         if (pidProfiles(i)->vbat_sag_compensation > 0 && !RPM_LIMIT_ACTIVE) {
             sagCompensationConfigured = true;
         }
+    }
+#endif
+#ifdef USE_WHIPPYFLIGHT
+    // WhippyFlight compensates for sag itself, from the latest reading.
+    if (whippyflightConfig()->enabled) {
+        sagCompensationConfigured = true;
     }
 #endif
 }

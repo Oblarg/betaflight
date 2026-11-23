@@ -36,6 +36,20 @@ typedef struct {
     float motor_duty[4];     // [0, 1], [REAR_R, FRONT_R, REAR_L, FRONT_L]
 } wf_control_output_t;
 
+// One motor's control effort (DEBUG_WHIPPYFLIGHT).  The command is
+// p + i + d + feedforward + affine; the allocator fits it into the battery's
+// range with the collective as applied.
+typedef struct {
+    int16_t p;                    // feedback of the rate error, mV
+    int16_t i;                    // feedback of the integral state, mV
+    int16_t d;                    // feedback of the derivative state, mV
+    int16_t feedforward;          // mV
+    int16_t affine;               // affine linearizer, mV
+    int16_t schedule_jitter;      // part of p + i + d from the gain schedule's fast motion, mV; 0 untraced
+    int16_t applied;              // allocated voltage, mV
+    int16_t filtered_speed;       // measured speed through the motor low-pass and idle clamp, 0.1 rev/s
+} wf_bf_effort_t;
+
 // Telemetry, already in the units BF logs it in: copy each field into its
 // slot as is.  The pidData fields are floats in the unit of one logged count
 // (blackbox lrintf()s them); the debug fields are rounded to int16_t.
@@ -43,12 +57,12 @@ typedef struct {
     float pid_p[3];               // pidData P, Sum: rate error, 0.1 deg/s
     float pid_i[3];               // pidData I: integral state / dt (low-passed rate error), 0.1 deg/s
     float pid_d[3];               // pidData D: rate-error derivative, deg/s²
+    float pid_f[3];               // pidData F: feedforward target, 0.1 deg/s
     int16_t feedback[4];          // per-motor feedback voltage, mV
-    int16_t raw_setpoint[3];      // last RX rate setpoint, 0.1 deg/s
-    int16_t setpoint[3];          // tracked rate setpoint, 0.1 deg/s
-    int16_t ff_target[3];         // feedforward target, 0.1 deg/s
-    int16_t feedforward_motor0;   // motor 0 feedforward voltage, cV
-    int16_t command_scale;        // allocator attitude scale, ‰ (1000 unless saturated)
+    int16_t raw_setpoint[3];      // blackbox rcCommand[0..2]: last RX rate setpoint, 0.1 deg/s
+    int16_t command_scale;        // blackbox setpoint[3]: allocator attitude scale, ‰ (1000 unless saturated)
+    float pid_setpoint[3];        // previousPidSetpoint (blackbox setpoint[0..2]): tracked rate setpoint, deg/s
+    wf_bf_effort_t effort[4];     // by BF motor index
 } wf_bf_telemetry_t;
 
 // GainLoadResult — matches repr(C) enum in types.rs.
@@ -94,12 +108,25 @@ extern void whippyflight_unload(void);
 // Idle speed, shaft rev/s.
 extern void whippyflight_set_min_speed(float idle_rps);
 
+// Lowest battery voltage the controller compensates for, 0.01 V; 0 is none.
+extern void whippyflight_set_min_battery(float floor_cv);
+
 // Cutoff of the low-pass on reported motor speeds, Hz; 0 is off.
 extern void whippyflight_set_motor_lpf(float cutoff_hz);
 
-// Stick setpoint tracking index λ at a 500 Hz link (higher follows the
-// stick more closely, lower smooths more).
-extern void whippyflight_set_stick_tracking(float lambda_500hz);
+// Cutoff of the low-pass on the battery reading, Hz; 0 is off.
+extern void whippyflight_set_battery_lpf(float cutoff_hz);
+
+// Share of the jerk limit the stick target holds back when easing onto its
+// goal, percent; 0 eases at the full limit.
+extern void whippyflight_set_brake_margin(float margin_pct);
+
+// Longest ramp over an RX dropout to the packet after it, ms; 0 steps.
+extern void whippyflight_set_dropout_ramp(float cap_ms);
+
+// Trace the gain schedule's jitter into the effort telemetry, at the cost of
+// a second gain interpolation every loop.
+extern void whippyflight_set_effort_trace(bool on);
 
 // NULL before the controller has run; valid until the next call.
 extern const wf_bf_telemetry_t *whippyflight_telemetry(void);
@@ -119,6 +146,9 @@ void whippyflightInit(void);
 // Whether this boot flies WhippyFlight; otherwise BF's PID controller and
 // mixer run as in upstream builds and WhippyFlight never blocks arming.
 bool whippyflightIsActive(void);
+
+// The last loop's telemetry, for blackbox; NULL before the controller has run.
+const wf_bf_telemetry_t *whippyflightTelemetry(void);
 
 // Copies the gain blob from the SD card (WHIPPYFLIGHT_GAIN_FILENAME) or,
 // failing that, the dataflash WHIPPYFLIGHT partition into RAM and hands it

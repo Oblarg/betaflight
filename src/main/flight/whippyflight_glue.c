@@ -40,6 +40,7 @@
 #include "fc/rc_modes.h"
 #include "fc/runtime_config.h"
 
+#include "flight/autopilot.h"
 #include "flight/failsafe.h"
 #include "flight/mixer.h"
 #include "flight/mixer_init.h"
@@ -49,8 +50,12 @@
 #include "io/asyncfatfs/asyncfatfs.h"
 
 #include "pg/motor.h"
+#include "pg/rx.h"
 #include "pg/sdcard.h"
 #include "pg/whippyflight.h"
+
+#include "rx/crsf.h"
+#include "rx/rx.h"
 
 #include "sensors/acceleration.h"
 #include "sensors/battery.h"
@@ -77,13 +82,14 @@ static float getMotorErpm(int motorIndex)
 #endif
 }
 
-// Battery voltage as getBatteryVoltage() reports it: centivolts.
+// The latest battery reading, centivolts: BF's display filter lags a sag by
+// seconds, and the controller filters it itself (whippyflight_vbat_lpf_hz).
 static float getBatteryCentivolts(void)
 {
 #ifdef SIMULATOR_BUILD
     return sitlGetBatteryVoltage();
 #else
-    return getBatteryVoltage();
+    return getBatteryVoltageLatest();
 #endif
 }
 
@@ -105,6 +111,44 @@ static void getAccelG(float out[3])
 // ---------------------------------------------------------------------------
 // Main entry point: replaces subTaskPidController + subTaskMotorUpdate.
 // ---------------------------------------------------------------------------
+
+static const wf_bf_telemetry_t *lastTelemetry;
+
+#if defined(USE_SERIALRX_CRSF)
+// Whether the stick setpoint is fed from CRSF's frame queue, so no frame
+// waits on the RX task.  Not while BF rewrites the sticks between frame and
+// setpoint: failsafe, MSP override, autopilot yaw, the camera-angle mix.
+static bool stickFramesDirect(void)
+{
+    return rxRuntimeState.rxProvider == RX_PROVIDER_SERIAL
+        && rxRuntimeState.serialrxProvider == SERIALRX_CRSF
+        && !failsafeIsActive()
+        && !IS_RC_MODE_ACTIVE(BOXFAILSAFE)
+#ifdef USE_RX_MSP_OVERRIDE
+        && !(rxConfig()->msp_override_channels_mask && IS_RC_MODE_ACTIVE(BOXMSPOVERRIDE))
+#endif
+        && !autopilotYawControlActive()
+        && !(rxConfig()->fpvCamAngleDegrees && IS_RC_MODE_ACTIVE(BOXFPVANGLEMIX) && !FLIGHT_MODE(HEADFREE_MODE));
+}
+
+// A queued frame's raw rate setpoint; false when a stick channel is invalid.
+static bool stickFrameSetpoint(const float channelsUs[CRSF_MAX_CHANNEL], float rate[3])
+{
+    for (int axis = FD_ROLL; axis <= FD_YAW; axis++) {
+        float channel;
+        if (!rxStickChannelNorm(axis, channelsUs[rxConfig()->rcmap[axis]], &channel)) {
+            return false;
+        }
+        rate[axis] = rcStickSetpoint(axis, channel);
+    }
+    return true;
+}
+#endif
+
+const wf_bf_telemetry_t *whippyflightTelemetry(void)
+{
+    return lastTelemetry;
+}
 
 void whippyflightPidAndMotorUpdate(timeUs_t currentTimeUs)
 {
@@ -149,8 +193,21 @@ void whippyflightPidAndMotorUpdate(timeUs_t currentTimeUs)
     // so BF's rc_smoothing output is not used here.
     static uint32_t lastRcFrameCount;
     const uint32_t rcFrameCount = getRcFrameCount();
-    if (rcFrameCount != lastRcFrameCount) {
-        lastRcFrameCount = rcFrameCount;
+    const bool rcFrameNew = rcFrameCount != lastRcFrameCount;
+    lastRcFrameCount = rcFrameCount;
+    bool direct = false;
+#if defined(USE_SERIALRX_CRSF)
+    direct = stickFramesDirect();
+    float channelsUs[CRSF_MAX_CHANNEL];
+    timeUs_t frameTimeUs;
+    while (crsfPopRcFrame(channelsUs, &frameTimeUs)) {
+        float rate[3];
+        if (direct && stickFrameSetpoint(channelsUs, rate)) {
+            whippyflight_setpoint_packet(rate, frameTimeUs, getCurrentRxRateHz());
+        }
+    }
+#endif
+    if (rcFrameNew && !direct) {
         const float rawRate[3] = {
             getRawSetpoint(FD_ROLL),
             getRawSetpoint(FD_PITCH),
@@ -164,8 +221,14 @@ void whippyflightPidAndMotorUpdate(timeUs_t currentTimeUs)
     // -----------------------------------------------------------------------
 
     whippyflight_set_min_speed(whippyflightConfig()->idle_rps);
+    const uint16_t criticalCell = whippyflightConfig()->critical_cell_voltage;
+    whippyflight_set_min_battery(getBatteryCellCount()
+        * (criticalCell ? criticalCell : currentBatteryProfile->vbatwarningcellvoltage));
     whippyflight_set_motor_lpf(whippyflightConfig()->rpm_lpf_hz);
-    whippyflight_set_stick_tracking(whippyflightConfig()->stick_tracking * 0.01f);
+    whippyflight_set_battery_lpf(whippyflightConfig()->vbat_lpf_hz);
+    whippyflight_set_brake_margin(whippyflightConfig()->brake_margin);
+    whippyflight_set_dropout_ramp(whippyflightConfig()->dropout_ramp_ms);
+    whippyflight_set_effort_trace(debugMode == DEBUG_WHIPPYFLIGHT);
     const wf_control_output_t output = whippyflight_update(&sensors, rcCommand[THROTTLE], currentTimeUs);
 
     // -----------------------------------------------------------------------
@@ -229,19 +292,25 @@ void whippyflightPidAndMotorUpdate(timeUs_t currentTimeUs)
     //      P = per-axis rate error (0.1 deg/s)
     //      I = per-axis integral state / dt: the low-passed rate error (0.1 deg/s)
     //      D = per-axis rate-error derivative (deg/s²)
-    //      F = 0 (feedforward is per-motor in our system)
+    //      F = per-axis setpoint estimate before shaping (0.1 deg/s)
+    //    The setpoint blackbox logs (pidRuntime.previousPidSetpoint) is the
+    //    shaped target the feedforward inverts; blackbox itself logs the raw
+    //    RX setpoint as rcCommand[0..2] and the command scale as setpoint[3]
+    //    (whippyflightTelemetry).
     //    Motor[] is already populated above.  The Rust side encodes every
     //    field in the unit it is logged in, so nothing is scaled here.
     // -----------------------------------------------------------------------
 
     const wf_bf_telemetry_t *telem = whippyflight_telemetry();
+    lastTelemetry = telem;
     if (telem != NULL) {
         for (int axis = 0; axis < XYZ_AXIS_COUNT; axis++) {
             pidData[axis].P = telem->pid_p[axis];
             pidData[axis].I = telem->pid_i[axis];
             pidData[axis].D = telem->pid_d[axis];
-            pidData[axis].F = 0.0f;
+            pidData[axis].F = telem->pid_f[axis];
             pidData[axis].Sum = telem->pid_p[axis]; // best single summary
+            pidRuntime.previousPidSetpoint[axis] = telem->pid_setpoint[axis];
         }
     } else {
         for (int axis = 0; axis < XYZ_AXIS_COUNT; axis++) {
@@ -250,6 +319,7 @@ void whippyflightPidAndMotorUpdate(timeUs_t currentTimeUs)
             pidData[axis].D = 0.0f;
             pidData[axis].F = 0.0f;
             pidData[axis].Sum = 0.0f;
+            pidRuntime.previousPidSetpoint[axis] = 0.0f;
         }
     }
 
@@ -262,18 +332,19 @@ void whippyflightPidAndMotorUpdate(timeUs_t currentTimeUs)
         DEBUG_SET(DEBUG_NONE, 3, telem->feedback[3]);  //!< Feedback Voltage Motor 3 [unit:0.001V]
     }
 
-    // Setpoint reconstruction, in 0.1 deg/s (the feedforward lead is only a
-    // few deg/s): raw RX setpoint, the estimate the controller tracked, and
-    // the feedforward target, for roll and pitch.
+    // One motor's control effort (whippyflight_debug_motor): the command is
+    // slots 0–4 summed, and slot 5 is the part of 0–2 the gain schedule's
+    // fast motion adds.
     if (telem != NULL && debugMode == DEBUG_WHIPPYFLIGHT) {
-        DEBUG_SET(DEBUG_WHIPPYFLIGHT, 0, telem->raw_setpoint[FD_ROLL]);  //!< Raw Setpoint Roll [unit:0.1dps]
-        DEBUG_SET(DEBUG_WHIPPYFLIGHT, 1, telem->setpoint[FD_ROLL]);      //!< Setpoint Estimate Roll [unit:0.1dps]
-        DEBUG_SET(DEBUG_WHIPPYFLIGHT, 2, telem->ff_target[FD_ROLL]);     //!< Feedforward Target Roll [unit:0.1dps]
-        DEBUG_SET(DEBUG_WHIPPYFLIGHT, 3, telem->raw_setpoint[FD_PITCH]); //!< Raw Setpoint Pitch [unit:0.1dps]
-        DEBUG_SET(DEBUG_WHIPPYFLIGHT, 4, telem->setpoint[FD_PITCH]);     //!< Setpoint Estimate Pitch [unit:0.1dps]
-        DEBUG_SET(DEBUG_WHIPPYFLIGHT, 5, telem->ff_target[FD_PITCH]);    //!< Feedforward Target Pitch [unit:0.1dps]
-        DEBUG_SET(DEBUG_WHIPPYFLIGHT, 6, telem->feedforward_motor0);     //!< Feedforward Voltage Motor 0 [unit:0.01V]
-        DEBUG_SET(DEBUG_WHIPPYFLIGHT, 7, telem->command_scale);          //!< Attitude Command Scale [unit:0.001]
+        const wf_bf_effort_t *effort = &telem->effort[whippyflightConfig()->debug_motor & 3];
+        DEBUG_SET(DEBUG_WHIPPYFLIGHT, 0, effort->p);               //!< Rate Error Feedback Voltage [unit:0.001V]
+        DEBUG_SET(DEBUG_WHIPPYFLIGHT, 1, effort->i);               //!< Integral Feedback Voltage [unit:0.001V]
+        DEBUG_SET(DEBUG_WHIPPYFLIGHT, 2, effort->d);               //!< Derivative Feedback Voltage [unit:0.001V]
+        DEBUG_SET(DEBUG_WHIPPYFLIGHT, 3, effort->feedforward);     //!< Feedforward Voltage [unit:0.001V]
+        DEBUG_SET(DEBUG_WHIPPYFLIGHT, 4, effort->affine);          //!< Affine Linearizer Voltage [unit:0.001V]
+        DEBUG_SET(DEBUG_WHIPPYFLIGHT, 5, effort->schedule_jitter); //!< Gain Schedule Jitter Voltage [unit:0.001V]
+        DEBUG_SET(DEBUG_WHIPPYFLIGHT, 6, effort->applied);         //!< Applied Motor Voltage [unit:0.001V]
+        DEBUG_SET(DEBUG_WHIPPYFLIGHT, 7, effort->filtered_speed);  //!< Filtered Motor Speed [unit:0.1rev/s]
     }
 
     // -----------------------------------------------------------------------

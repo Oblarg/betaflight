@@ -2139,8 +2139,12 @@ const clivalue_t valueTable[] = {
 #ifdef USE_WHIPPYFLIGHT
     { PARAM_NAME_WHIPPYFLIGHT_ENABLED,     VAR_UINT8  | MASTER_VALUE | MODE_LOOKUP, .config.lookup = { TABLE_OFF_ON }, PG_WHIPPYFLIGHT_CONFIG, offsetof(whippyflightConfig_t, enabled) },
     { PARAM_NAME_WHIPPYFLIGHT_RPM_LPF_HZ,  VAR_UINT16 | MASTER_VALUE, .config.minmaxUnsigned = { 0, WHIPPYFLIGHT_RPM_LPF_HZ_MAX }, PG_WHIPPYFLIGHT_CONFIG, offsetof(whippyflightConfig_t, rpm_lpf_hz) },
-    { PARAM_NAME_WHIPPYFLIGHT_STICK_TRACKING, VAR_UINT16 | MASTER_VALUE, .config.minmaxUnsigned = { WHIPPYFLIGHT_STICK_TRACKING_MIN, WHIPPYFLIGHT_STICK_TRACKING_MAX }, PG_WHIPPYFLIGHT_CONFIG, offsetof(whippyflightConfig_t, stick_tracking) },
     { PARAM_NAME_WHIPPYFLIGHT_IDLE_RPS,    VAR_UINT16 | MASTER_VALUE, .config.minmaxUnsigned = { 0, WHIPPYFLIGHT_IDLE_RPS_MAX }, PG_WHIPPYFLIGHT_CONFIG, offsetof(whippyflightConfig_t, idle_rps) },
+    { PARAM_NAME_WHIPPYFLIGHT_DEBUG_MOTOR, VAR_UINT8  | MASTER_VALUE, .config.minmaxUnsigned = { 0, WHIPPYFLIGHT_DEBUG_MOTOR_MAX }, PG_WHIPPYFLIGHT_CONFIG, offsetof(whippyflightConfig_t, debug_motor) },
+    { PARAM_NAME_WHIPPYFLIGHT_CRITICAL_CELL_VOLTAGE, VAR_UINT16 | MASTER_VALUE, .config.minmaxUnsigned = { 0, VBAT_CELL_VOTAGE_RANGE_MAX }, PG_WHIPPYFLIGHT_CONFIG, offsetof(whippyflightConfig_t, critical_cell_voltage) },
+    { PARAM_NAME_WHIPPYFLIGHT_DROPOUT_RAMP_MS, VAR_UINT8 | MASTER_VALUE, .config.minmaxUnsigned = { 0, WHIPPYFLIGHT_DROPOUT_RAMP_MS_MAX }, PG_WHIPPYFLIGHT_CONFIG, offsetof(whippyflightConfig_t, dropout_ramp_ms) },
+    { PARAM_NAME_WHIPPYFLIGHT_VBAT_LPF_HZ, VAR_UINT8 | MASTER_VALUE, .config.minmaxUnsigned = { 0, WHIPPYFLIGHT_VBAT_LPF_HZ_MAX }, PG_WHIPPYFLIGHT_CONFIG, offsetof(whippyflightConfig_t, vbat_lpf_hz) },
+    { PARAM_NAME_WHIPPYFLIGHT_BRAKE_MARGIN, VAR_UINT8 | MASTER_VALUE, .config.minmaxUnsigned = { 0, WHIPPYFLIGHT_BRAKE_MARGIN_MAX }, PG_WHIPPYFLIGHT_CONFIG, offsetof(whippyflightConfig_t, brake_margin) },
 #endif
 
 #ifdef USE_RX_FLYSKY

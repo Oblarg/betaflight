@@ -274,11 +274,15 @@ typedef struct {
 } servo_packet;
 
 // Lockstep (WhippyFlight) builds answer each fdm_packet with this: the
-// servo_packet plus that PID loop's debug[] values, so a simulator can
-// trace them per loop.
+// servo_packet plus that PID loop's debug[] values and WhippyFlight's
+// setpoint, so a simulator can trace them per loop.
 typedef struct {
     servo_packet servo;
     int16_t debug[8];       // build/debug.h debug[]
+    // per axis [roll, pitch, yaw] (BF's FLU): raw RX setpoint, the estimate
+    // the controller tracked and the feedforward target, 0.1 deg/s; zero
+    // before WhippyFlight has run
+    int16_t setpoint[3][3];
 } servo_packet_debug;
 
 typedef struct {

@@ -1586,11 +1586,15 @@ FAST_CODE void taskGyroSample(timeUs_t currentTimeUs)
 
 FAST_CODE bool gyroFilterReady(void)
 {
+#ifdef USE_GYRO_FILTER_AT_SAMPLE_RATE
+    return true;
+#else
     if (pidUpdateCounter % activePidLoopDenom == 0) {
         return true;
     } else {
         return false;
     }
+#endif
 }
 
 FAST_CODE bool pidLoopReady(void)
@@ -1604,6 +1608,10 @@ FAST_CODE bool pidLoopReady(void)
 FAST_CODE void taskFiltering(timeUs_t currentTimeUs)
 {
 #ifdef USE_DSHOT_TELEMETRY
+#ifdef USE_GYRO_FILTER_AT_SAMPLE_RATE
+    // Telemetry arrives once per motor write, i.e. per PID loop.
+    if (pidUpdateCounter % activePidLoopDenom == 0)
+#endif
     updateDshotTelemetry();  // decode and update Dshot telemetry
 #endif
     gyroFiltering(currentTimeUs);

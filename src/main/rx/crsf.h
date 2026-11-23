@@ -91,3 +91,10 @@ bool crsfRxIsEventDrivenTelemetry(void);
 #endif
 bool crsfRxIsActive(void);
 void crsfRxBind(void);
+#ifdef USE_WHIPPYFLIGHT
+#include "common/time.h"
+// The oldest RC frame not yet popped: every channel, µs as the RX task
+// reads them, and its arrival time.  False when there is none.  Frames come
+// in order; the queue holds the last few.
+bool crsfPopRcFrame(float channelsUs[CRSF_MAX_CHANNEL], timeUs_t *timeUs);
+#endif

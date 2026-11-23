@@ -702,21 +702,33 @@ FAST_CODE void processRcCommand(void)
     isRxDataNew = false;
 }
 
+// A roll, pitch or yaw channel, normalized as rcData, as its rcCommand.
+static float rcCommandFromChannel(int axis, float channel)
+{
+    float rc = constrainf(channel - rcUsToNorm(rxConfig()->midrc), NORMALISED_RANGE_MIN, NORMALISED_RANGE_MAX);
+    float rcDeadband = 0;
+    if (axis == ROLL || axis == PITCH) {
+        rcDeadband = rcUsSpanToNorm(rcControlsConfig()->deadband);
+    } else {
+        rcDeadband = rcUsSpanToNorm(rcControlsConfig()->yaw_deadband);
+        rc *= -GET_DIRECTION(rcControlsConfig()->yaw_control_reversed);
+    }
+    return fapplyDeadband(rc, rcDeadband) / (NORMALISED_RANGE_MAX - rcDeadband);
+}
+
+float rcStickSetpoint(int axis, float channel)
+{
+    const float rcCommandf = rcCommandFromChannel(axis, channel);
+    const float limit = currentControlRateProfile->rate_limit[axis];
+    return constrainf(applyRates(axis, rcCommandf, fabsf(rcCommandf)), -limit, limit);
+}
+
 FAST_CODE_NOINLINE void updateRcCommands(void)
 {
     isRxDataNew = true;
 
-    const float midrc = rcUsToNorm(rxConfig()->midrc);
     for (int axis = 0; axis < 3; axis++) {
-        float rc = constrainf(rcGetChannel(axis) - midrc, NORMALISED_RANGE_MIN, NORMALISED_RANGE_MAX);
-        float rcDeadband = 0;
-        if (axis == ROLL || axis == PITCH) {
-            rcDeadband = rcUsSpanToNorm(rcControlsConfig()->deadband);
-        } else {
-            rcDeadband = rcUsSpanToNorm(rcControlsConfig()->yaw_deadband);
-            rc *= -GET_DIRECTION(rcControlsConfig()->yaw_control_reversed);
-        }
-        rcCommand[axis] = fapplyDeadband(rc, rcDeadband) / (NORMALISED_RANGE_MAX - rcDeadband);
+        rcCommand[axis] = rcCommandFromChannel(axis, rcGetChannel(axis));
     }
 
     float throttle;

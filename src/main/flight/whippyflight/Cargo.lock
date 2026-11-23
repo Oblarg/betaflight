@@ -357,8 +357,6 @@ dependencies = [
 [[package]]
 name = "whippyflight-control"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a38f8b1073a094815231768f5aaf4b67f5b7be7f367470d428463dd19fbb1c60"
 dependencies = [
  "bytemuck",
  "libm",

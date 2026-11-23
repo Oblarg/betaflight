@@ -543,6 +543,12 @@ STATIC_UNIT_TESTED bool testBlackboxConditionUncached(flightLogFieldCondition_e 
     case CONDITION(NONZERO_PID_D_0):
     case CONDITION(NONZERO_PID_D_1):
     case CONDITION(NONZERO_PID_D_2):
+#ifdef USE_WHIPPYFLIGHT
+        // WhippyFlight's D is its derivative state, which its gains use on every axis
+        if (whippyflightIsActive()) {
+            return isFieldEnabled(FIELD_SELECT(PID));
+        }
+#endif
         return (currentPidProfile->pid[condition - FLIGHT_LOG_FIELD_CONDITION_NONZERO_PID_D_0].D != 0) && isFieldEnabled(FIELD_SELECT(PID));
 
 #ifdef USE_WING
@@ -1330,6 +1336,19 @@ static void loadMainState(timeUs_t currentTimeUs)
     }
     // log the final throttle value used in the mixer
     blackboxCurrent->setpoint[3] = lrintf(mixerGetThrottle() * 1000);
+#ifdef USE_WHIPPYFLIGHT
+    // WhippyFlight has no mixer, and the sticks' rate setpoint is what it
+    // reads of rcCommand[0..2] (throttle stays in rcCommand[3]): log the raw
+    // RX setpoint (0.1 deg/s) there and the allocator's command scale (‰) in
+    // setpoint[3].
+    const wf_bf_telemetry_t *wfTelemetry = whippyflightIsActive() ? whippyflightTelemetry() : NULL;
+    if (wfTelemetry != NULL) {
+        for (int i = 0; i < XYZ_AXIS_COUNT; i++) {
+            blackboxCurrent->rcCommand[i] = wfTelemetry->raw_setpoint[i];
+        }
+        blackboxCurrent->setpoint[3] = wfTelemetry->command_scale;
+    }
+#endif
 
     for (int i = 0; i < DEBUG16_VALUE_COUNT; i++) {
         blackboxCurrent->debug[i] = debug[i];
@@ -1768,10 +1787,12 @@ static bool blackboxWriteSysinfo(void)
 #ifdef USE_WHIPPYFLIGHT
         BLACKBOX_PRINT_HEADER_LINE(PARAM_NAME_WHIPPYFLIGHT_ENABLED, "%d",     whippyflightIsActive());
         BLACKBOX_PRINT_HEADER_LINE(PARAM_NAME_WHIPPYFLIGHT_RPM_LPF_HZ, "%d",  whippyflightConfig()->rpm_lpf_hz);
-        // lambda itself, not the setting's hundredths
-        BLACKBOX_PRINT_HEADER_LINE(PARAM_NAME_WHIPPYFLIGHT_STICK_TRACKING, "%d.%02d",
-                                   whippyflightConfig()->stick_tracking / 100, whippyflightConfig()->stick_tracking % 100);
         BLACKBOX_PRINT_HEADER_LINE(PARAM_NAME_WHIPPYFLIGHT_IDLE_RPS, "%d",    whippyflightConfig()->idle_rps);
+        BLACKBOX_PRINT_HEADER_LINE(PARAM_NAME_WHIPPYFLIGHT_DEBUG_MOTOR, "%d", whippyflightConfig()->debug_motor);
+        BLACKBOX_PRINT_HEADER_LINE(PARAM_NAME_WHIPPYFLIGHT_CRITICAL_CELL_VOLTAGE, "%d", whippyflightConfig()->critical_cell_voltage);
+        BLACKBOX_PRINT_HEADER_LINE(PARAM_NAME_WHIPPYFLIGHT_DROPOUT_RAMP_MS, "%d", whippyflightConfig()->dropout_ramp_ms);
+        BLACKBOX_PRINT_HEADER_LINE(PARAM_NAME_WHIPPYFLIGHT_VBAT_LPF_HZ, "%d", whippyflightConfig()->vbat_lpf_hz);
+        BLACKBOX_PRINT_HEADER_LINE(PARAM_NAME_WHIPPYFLIGHT_BRAKE_MARGIN, "%d", whippyflightConfig()->brake_margin);
 #endif
 #if defined(USE_ACC)
         BLACKBOX_PRINT_HEADER_LINE(PARAM_NAME_ACC_LPF_HZ, "%d",        (int)(accelerometerConfig()->acc_lpf_hz * 100.0f));

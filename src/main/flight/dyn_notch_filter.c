@@ -175,7 +175,7 @@ void dynNotchInit(const dynNotchConfig_t *config, const timeUs_t looptimeUs)
 
     const float dt = looptimeUs * 1e-6f;
 
-    // dynNotchUpdate() is running at looprateHz (which is the PID looprate aka. 1e6f / gyro.targetLooptime)
+    // dynNotchUpdate() is running at looprateHz (the gyro filter rate aka. 1e6f / gyro.filterLooptime)
     const float looprateHz = 1.0f / dt;
     const float nyquistHz = looprateHz / 2.0f;
 
