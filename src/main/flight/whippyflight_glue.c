@@ -228,6 +228,7 @@ void whippyflightPidAndMotorUpdate(timeUs_t currentTimeUs)
     whippyflight_set_battery_lpf(whippyflightConfig()->vbat_lpf_hz);
     whippyflight_set_brake_margin(whippyflightConfig()->brake_margin);
     whippyflight_set_dropout_ramp(whippyflightConfig()->dropout_ramp_ms);
+    whippyflight_set_schedule_every_tick(whippyflightConfig()->schedule_every_tick);
     whippyflight_set_effort_trace(debugMode == DEBUG_WHIPPYFLIGHT);
     const wf_control_output_t output = whippyflight_update(&sensors, rcCommand[THROTTLE], currentTimeUs);
 

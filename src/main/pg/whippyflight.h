@@ -69,6 +69,10 @@ typedef struct whippyflightConfig_s {
     // eases onto its goal, for airframes that brake worse than their fit;
     // 0 eases at the full limit.
     uint8_t brake_margin;
+    // Interpolate the gain schedule in full every loop rather than over two
+    // loops; for MCUs with the time to at their loop rate.  0 must stay the
+    // default: configs saved before this field read it from padding.
+    uint8_t schedule_every_tick;
 } whippyflightConfig_t;
 
 PG_DECLARE(whippyflightConfig_t, whippyflightConfig);

@@ -1793,6 +1793,7 @@ static bool blackboxWriteSysinfo(void)
         BLACKBOX_PRINT_HEADER_LINE(PARAM_NAME_WHIPPYFLIGHT_DROPOUT_RAMP_MS, "%d", whippyflightConfig()->dropout_ramp_ms);
         BLACKBOX_PRINT_HEADER_LINE(PARAM_NAME_WHIPPYFLIGHT_VBAT_LPF_HZ, "%d", whippyflightConfig()->vbat_lpf_hz);
         BLACKBOX_PRINT_HEADER_LINE(PARAM_NAME_WHIPPYFLIGHT_BRAKE_MARGIN, "%d", whippyflightConfig()->brake_margin);
+        BLACKBOX_PRINT_HEADER_LINE(PARAM_NAME_WHIPPYFLIGHT_SCHEDULE_EVERY_TICK, "%d", whippyflightConfig()->schedule_every_tick);
 #endif
 #if defined(USE_ACC)
         BLACKBOX_PRINT_HEADER_LINE(PARAM_NAME_ACC_LPF_HZ, "%d",        (int)(accelerometerConfig()->acc_lpf_hz * 100.0f));

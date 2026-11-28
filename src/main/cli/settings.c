@@ -2145,6 +2145,7 @@ const clivalue_t valueTable[] = {
     { PARAM_NAME_WHIPPYFLIGHT_DROPOUT_RAMP_MS, VAR_UINT8 | MASTER_VALUE, .config.minmaxUnsigned = { 0, WHIPPYFLIGHT_DROPOUT_RAMP_MS_MAX }, PG_WHIPPYFLIGHT_CONFIG, offsetof(whippyflightConfig_t, dropout_ramp_ms) },
     { PARAM_NAME_WHIPPYFLIGHT_VBAT_LPF_HZ, VAR_UINT8 | MASTER_VALUE, .config.minmaxUnsigned = { 0, WHIPPYFLIGHT_VBAT_LPF_HZ_MAX }, PG_WHIPPYFLIGHT_CONFIG, offsetof(whippyflightConfig_t, vbat_lpf_hz) },
     { PARAM_NAME_WHIPPYFLIGHT_BRAKE_MARGIN, VAR_UINT8 | MASTER_VALUE, .config.minmaxUnsigned = { 0, WHIPPYFLIGHT_BRAKE_MARGIN_MAX }, PG_WHIPPYFLIGHT_CONFIG, offsetof(whippyflightConfig_t, brake_margin) },
+    { PARAM_NAME_WHIPPYFLIGHT_SCHEDULE_EVERY_TICK, VAR_UINT8 | MASTER_VALUE | MODE_LOOKUP, .config.lookup = { TABLE_OFF_ON }, PG_WHIPPYFLIGHT_CONFIG, offsetof(whippyflightConfig_t, schedule_every_tick) },
 #endif
 
 #ifdef USE_RX_FLYSKY

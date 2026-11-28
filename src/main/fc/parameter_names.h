@@ -167,6 +167,7 @@
 #define PARAM_NAME_WHIPPYFLIGHT_DROPOUT_RAMP_MS "whippyflight_dropout_ramp_ms"
 #define PARAM_NAME_WHIPPYFLIGHT_VBAT_LPF_HZ "whippyflight_vbat_lpf_hz"
 #define PARAM_NAME_WHIPPYFLIGHT_BRAKE_MARGIN "whippyflight_brake_margin"
+#define PARAM_NAME_WHIPPYFLIGHT_SCHEDULE_EVERY_TICK "whippyflight_schedule_every_tick"
 
 #define PARAM_NAME_ALTITUDE_SOURCE "altitude_source"
 #define PARAM_NAME_ALTITUDE_PREFER_BARO "altitude_prefer_baro"

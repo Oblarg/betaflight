@@ -124,6 +124,10 @@ extern void whippyflight_set_brake_margin(float margin_pct);
 // Longest ramp over an RX dropout to the packet after it, ms; 0 steps.
 extern void whippyflight_set_dropout_ramp(float cap_ms);
 
+// Interpolate the gains in full every loop rather than over two, for MCUs
+// with the time to.
+extern void whippyflight_set_schedule_every_tick(bool on);
+
 // Trace the gain schedule's jitter into the effort telemetry, at the cost of
 // a second gain interpolation every loop.
 extern void whippyflight_set_effort_trace(bool on);

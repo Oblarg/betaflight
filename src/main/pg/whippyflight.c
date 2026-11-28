@@ -39,6 +39,7 @@ PG_RESET_TEMPLATE(whippyflightConfig_t, whippyflightConfig,
     .dropout_ramp_ms = 12,
     .vbat_lpf_hz = 20,
     .brake_margin = 0,
+    .schedule_every_tick = 0,
 );
 
 #endif // USE_WHIPPYFLIGHT

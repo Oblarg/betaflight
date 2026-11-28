@@ -256,6 +256,16 @@ pub unsafe extern "C" fn whippyflight_set_dropout_ramp(cap: Millis) {
     unsafe { DROPOUT.get_mut() }.set_cap(rescale_f32(cap));
 }
 
+/// Interpolate the gains in full every loop
+/// (`whippyflight_schedule_every_tick`) rather than over two.
+///
+/// # Safety
+/// BF's main loop only (see the module docs).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn whippyflight_set_schedule_every_tick(on: bool) {
+    unsafe { controller_mut() }.set_schedule_every_tick(on);
+}
+
 /// Trace the feedback's schedule jitter into the telemetry's effort
 /// (`debug_mode = WHIPPYFLIGHT`), at the cost of a second
 /// interpolation of the feedback gains every loop.
